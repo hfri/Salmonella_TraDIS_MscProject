@@ -1,0 +1,1535 @@
+---
+title: "Differential_fitness_analysis_Pathway_M_SL1344"
+author: "Hanna Fricke"
+date: "2023-09-11"
+output: html_document
+---
+
+In this document I analyse the data of a TraDIS experiment of salmonella infected macrophages. The count data was obtained from Laura and first steps of the analysis are based on her code. This script only contains analyses steps used to obtain the final dataset and no diagnostics.
+
+# Differential fitness analysis
+
+The first section of this scrit is concerned with obtaining differentially "expressed" genes (= genes that are amplified or attenuated during intramacrophage growth). The first DE analysis is done using a standard edgeR approach, showing a bias due to plasmid counts. The second DE analysis corrects for this bias by supplying a corrected offset. 
+
+## Preparation: Make folders for outputs (images, excel, RData),data, Rmd
+
+### Set working directory, path
+
+```{r}
+# set result directory for plots etc.
+# make sure to add the correct date and follow structure output/date/date_filetype
+library('knitr')
+data_dir <- "/home/hanna/Documents/Macrophages_project/Final/M_SL1344/data/"
+res_dir <- "/home/hanna/Documents/Macrophages_project/Final/M_SL1344/output/"
+excel <- "/home/hanna/Documents/Macrophages_project/Final/M_SL1344/output/excel/" # for output files
+images <- "/home/hanna/Documents/Macrophages_project/Final/M_SL1344/output/images/" # for figures
+KEGGpaths <- "/home/hanna/Documents/Macrophages_project/Final/M_SL1344/output/images/KEGGpaths/" # for figures
+# create directories if not already present
+if(!dir.exists(res_dir)) dir.create(res_dir)
+if(!dir.exists(excel)) dir.create(excel)
+if(!dir.exists(images)) dir.create(images)
+if(!dir.exists(KEGGpaths)) dir.create(KEGGpaths)
+
+# set knitr options and working directory
+knitr::opts_chunk$set(warning=F,message=F, echo=T, dev="cairo_pdf")
+knitr::opts_knit$set(root.dir = '/home/hanna/Documents/Macrophages_project/My_data/')
+```
+
+##  Read the sample info, data, get meta data, and prepare data for analysis
+
+### Give the data appropriate column names, and to obtain the meta data as well as count data.
+
+```{r,echo=FALSE}
+# Get sample info
+sample_info <- read.table(paste(data_dir, "JVS1574.txt", sep=""), header=F, sep="\t", quote="\"", stringsAsFactors=F) # read file to get info 
+colnames(sample_info) <- c("lane", "sample", "identifier", "strain", "Condition", "replicate") # give columns a name. Column strain and Condition are empty
+
+sample_info$strain <- sapply(sample_info$identifier, function(x) strsplit(as.character(x), "_")[[1]])[1,] # get strain info 
+sample_info$Condition <- sapply(sample_info$identifier, function(x) strsplit(as.character(x), "_")[[1]])[2,]  # get exp. Condition
+sample_info$Batch <- sapply(sample_info$lane, function(x) strsplit(as.character(x), "_")[[1]])[1,]  # get Batch number
+sample_info$identifier <- mapply(function(x, y) sub("R[1-9]", paste("R", y, sep=""), x), sample_info$identifier, sample_info$replicate) #obtain identifier
+```
+
+### Read the count file
+
+```{r,echo=FALSE}
+#load packages needed for reading files and df operations
+library('data.table')
+library('plyr')
+library('dplyr')
+library('tidyr')
+# Get count data and meta data
+counts_tab <- fread(paste0(data_dir, "salmonella_tradis_gene.csv"), data.table=F) # read counts file 
+rownames(counts_tab) <- counts_tab$locus_tag # genen names as row names
+meta_data <- counts_tab[,1:9] # make a frame with meta data
+counts_tab <- counts_tab[,-(1:9)] %>% data.matrix() # remove meta data for the analysis so that only count data remains 
+```
+
+
+## Initiate EdgeR variable
+
+### Match metadata and create factor variables (Batch, Condition, replicate), make DGEList object
+
+```{r,echo=FALSE}
+library(edgeR)
+## Match metadata to data and create factors
+sample_info <- sample_info[match(colnames(counts_tab), sample_info$identifier),]
+group <- factor(sample_info$Condition) # Condition grouping factor
+Batch <- factor(sample_info$Batch)     # factor for Batch
+replicate <- factor(sample_info$replicate) # replicate factor
+
+dgeAll <- DGEList(counts_tab, group=group, genes=rownames(counts_tab)) # make a DGE list with group indicator=column and rows= feature
+edgeR::cpm(10,mean(dgeAll$samples$lib.size)) # rule of thumb for filtering
+```
+
+Comment: based on the rule of thumb result (~2.14), I used a filtering threshold of 2.5.
+
+### Filter and remove too small counts
+
+Remove samples based on rowSums and presence in a minimum number of samples
+
+```{r}
+# Remove all counts that are too low 
+
+keep <- rowSums(edgeR::cpm(dgeAll$counts[,!grepl("RNA", colnames(dgeAll$counts))]) >2.5) >= 6 # filter to count of 10 in over/= 6 samples
+dgeAll <- dgeAll[keep, , keep.lib.sizes=F] # keep.lib.sizes=FALSE, the lib.size for each sample will be recalculated 
+dgeAll2<-dgeAll # needed for later steps in the analysis were I need dgeAll counts without the normalisation factor
+
+```
+
+Comment: - Filtered based on cpm of 2.5 for >=4 samplesremoved 5127- 4775 removed 352 genes. Also tried higher thresholds which did not appear to make too much of a difference, so I decided to keep the filtering threshold relatively low.
+
+### Normalise counts to adjust library size
+
+Normalisation in EdgeR is done by TMM which removes the genes with the highest variance. Here we will calculate the normalisation factor based on Pseudogenes which should not differ in expression levels between input and output.
+
+Normalisation using pseudogenes:
+
+```{r,echo=FALSE, fig.show='hide'}
+# Normalize using pseudo genes only (might not be necessary)
+keep <- which(dgeAll$genes$genes %in% subset(meta_data, type=="pseudo")$locus_tag) #  returns the position or the index of the value which satisfies the given Condition. 
+dgePseudo <- dgeAll[keep, , keep.lib.sizes=T]
+dgePseudo  <- calcNormFactors(dgePseudo) # Normfactors scale the library during normalisation so that highly expressed genes do not affect the normalisation procedure
+dgeAll$samples$norm.factors <- dgePseudo$samples$norm.factors
+
+#calculate the normalised counts and inspect the data
+# with Pseudogenes
+normCounts <- edgeR::cpm(dgeAll) # divide by library size and multiply by 1mio
+pseudoNormCounts <- log2(normCounts + 1)
+```
+
+### Inspect correlation
+
+Look at heatmap to see how replicates correlate :
+```{r}
+library(patchwork)
+library(ComplexHeatmap)
+library(circlize)
+library(pheatmap)
+plot_heatmap<- function(counts_tab,res,meta,n_genes=10, annotation, fname,DE=T,logcpm=T){
+  # Add the gene names to the data
+  # order the top values and get the
+  if(logcpm==F){
+  logCPM <- data.frame(edgeR::cpm(counts_tab, prior.count=1, log=TRUE))}# log transform values and take cpm , +1 to avoid undefined log2(0)
+  if(logcpm){
+    print("check")
+    logCPM<-as.data.frame(counts_tab)
+  }
+  logCPM <-logCPM[,c(1,4,2,5,3,6,7:18)] # make order of columns nicer
+  N=NA
+  if (DE){
+    logCPM$FDR<-res$FDR[match(rownames(logCPM),res$locus_tag)]
+    o <- order(logCPM$FDR) # returns indices of P-values in sorted manner
+    logCPM <-logCPM[o[1:n_genes],] # plot top genes --> select desired range
+    logCPM<-logCPM[,c(1:length(logCPM[1,])-1)] # remove FDR column
+    N=2
+  }
+  logCPM <- t(scale(t(logCPM))) # scale to mean 0 and sd 1
+  
+  # Create the heatmap annotation
+  # column annotations
+  annotation_col = data.frame(
+                      Condition = factor(rep(c("Input", "Output"), 9)))
+  rownames(annotation_col)<-colnames(logCPM)
+  
+  ann_colors = list(
+    Condition = c(Input = "grey", Output = "#000004FF"))#col_fun(annotation_row$LogFC))#
+  heatmap<-ComplexHeatmap::pheatmap(logCPM, 
+           clustering_method = "ward.D2", #ward.d2
+           cluster_rows = T,                       
+           cluster_cols = T, 
+           show_rownames = F, 
+           show_colnames = F,
+           cutree_rows = N,
+           cutree_cols = 2,
+           treeheight_row= 0,
+           annotation_col = annotation_col, 
+           annotation_names_row = F,
+           annotation_names_col = F,
+           name = "Log2 (cpm)",
+           annotation_colors = ann_colors,
+           col=colorRampPalette(c( "#38598CFF","#F7F7F7","#440154FF"))(50),
+           clustering_distance_rows = "euclidean")
+  print(heatmap)
+  cairo_pdf(paste0(fname,".pdf") , width = 6, height = 6) # have issues with paste so will jsut specify the whole pathway name CHANGE name for pseudo/no pseudo gene normalisation
+  print(heatmap)
+  dev.off()
+  png(paste0(fname, ".png"), width = 2000, height = 2000, res=300)
+  print(heatmap)
+  dev.off()
+  return(heatmap)}
+  
+```
+
+### Heatmap all vs. all raw and TMM corrected
+```{r}
+## raw counts
+heatmap1<-plot_heatmap(counts_tab=dgeAll2$counts,logcpm=F,meta=meta_data,n_genes=length(normCounts[,1]),DE=F,fname=paste0(images, "TraDIS_heatmap_raw_counts_All_genes"))
+
+## TMM normalised
+heatmapTMM<-plot_heatmap(counts_tab=dgeAll,logcpm=F,meta=meta_data,n_genes=length(normCounts[,1]),DE=F,fname=paste0(images, "TraDIS_heatmap_TMMlogCPM_All_genes"))
+```
+Comment: TMM normalisation disturbs clustering..
+
+### Plot PCA of TMM normalised counts
+
+```{r}
+library(ggrepel)
+library(viridis)
+pdf(paste0(images,"PCA_TMM_norm.pdf"), width = 15, height =12.5)
+logcounts <- pseudoNormCounts 
+pca_raw <- stats::prcomp(t(logcounts))  # :: helps you to access specific package in r (here stats:) then apply pcrcomps to transposed logcounts
+pca_df <- cbind(pca_raw$x %>% as.data.frame(),   # make a PCA df by cbind (column bind), make it a df with x=PCA components  and add a column with sample_names
+                sample=rownames(pca_raw$x))
+pca_df$Condition <- sample_info$Condition[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+pca_df$replicate <- sample_info$replicate[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+pca_df$Batch <- sample_info$Batch[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+
+pca_imp <- summary(pca_raw)$importance[2,] # summary statistics of the PCA statistics--> importance probably gives variance xplained?
+
+# plot the PCA1 and PCA2
+PCA1 <- ggplot(pca_df, aes(x=PC1, y=PC2, label=ifelse(replicate=="1",as.character(replicate),''), col=factor(Condition))) +
+  geom_point(aes(shape=Batch), size=6) +
+  geom_text_repel(box.padding = 0.5,max.overlaps = Inf,position = position_jitter(0.2, seed = 2), show.legend = FALSE, size=10)+
+  scale_color_manual("Condition", values=viridis(3)) +
+  scale_size_manual("", values=c(7,4)) +
+  scale_x_continuous(name=paste0("PC1 (", round(pca_imp[1]*100), "%)")) +
+  scale_y_continuous(name=paste0("PC2 (", round(pca_imp[2]*100), "%)")) +
+  theme_classic() +
+  theme(axis.text=element_text(size=30),
+        axis.title=element_text(size=40),
+        plot.title=element_blank(),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="top",
+        legend.box="vertical",
+        legend.margin=margin())
+print(PCA1)
+dev.off()
+
+
+```
+Comment: TMM  normalisation appears to reduce separation --> replicate 1 and batch 1 show replicate and batch effec
+
+### Correct Batch effect
+Batch effects can be corrected for plotting purposes using removeBatchEffect while accounting for experimental design!
+```{r}
+# Include design matrix to account for the wanted effect
+designBatchCor <- model.matrix(~0+group)# model without intercept
+colnames(designBatchCor) <- colnames(designBatchCor) %>% sub("group", "", .) # remove group from groupOUTPUT
+
+y2 <- dgeAll
+logCPM <- cpm(y2, log=TRUE, prior.count=1)
+logCPMc <- removeBatchEffect(logCPM, batch=c("R1","R2","R3","R1","R2","R3","R4","R4","R5","R5","R6","R6","R7","R7","R8","R8","R9","R9"), design=designBatchCor)
+write.csv(logCPMc,paste0(excel,"heatmap_all_data_CPMc.csv"))
+```
+
+ PCA of replicate corrected counts
+```{r}
+logcounts <- logCPMc 
+pca_raw <- stats::prcomp(t(logcounts))  # :: helps you to access specific package in r (here stats:) then apply pcrcomps to transposed logcounts
+pca_df <- cbind(pca_raw$x %>% as.data.frame(),   # make a PCA df by cbind (column bind), make it a df with x=PCA components  and add a column with sample_names
+                sample=rownames(pca_raw$x))
+pca_df$Condition <- sample_info$Condition[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+pca_df$replicate <- sample_info$replicate[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+pca_df$Batch <- sample_info$Batch[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+
+pca_imp <- summary(pca_raw)$importance[2,] # summary statistics of the PCA statistics--> importance probably gives variance xplained?
+
+# plot the PCA1 and PCA2
+library(ggrepel)
+pdf(paste0(images,"PCA_BatchCor_TMMlogCounts.pdf"), width = 15, height =12.5)
+PCA_logCPMc <- ggplot(pca_df, aes(x=PC1, y=PC2, label=ifelse(replicate=="1",as.character(replicate),''), col=factor(Condition))) +
+  geom_point(aes(shape=Batch), size=6) +
+  geom_text_repel(box.padding = 0.5,max.overlaps = Inf,position = position_jitter(0.2, seed = 2), show.legend = FALSE, size=10)+
+  scale_color_manual("Condition", values=viridis(3)) +
+  scale_size_manual("", values=c(7,4)) +
+  scale_x_continuous(name=paste0("PC1 (", round(pca_imp[1]*100), "%)")) +
+  scale_y_continuous(name=paste0("PC2 (", round(pca_imp[2]*100), "%)")) +
+  theme_classic() +
+  theme(axis.text=element_text(size=30),
+        axis.title=element_text(size=40),
+        plot.title=element_blank(),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="top",
+        legend.box="vertical",
+        legend.margin=margin(),
+        plot.margin= unit(c(1,2,1,1), "cm"))
+print(PCA_logCPMc)
+```
+
+
+Heatmap to look if batch correction, results in correct clustering
+```{r}
+## TMM normalised
+heatmapTMMlogCPMc<-plot_heatmap(counts_tab=logCPMc ,logcpm=T,meta=meta_data,n_genes=length(normCounts[,1]),DE=F,fname=paste0(images, "TraDIS_heatmap_TMMlogCPMc_All_genes"))
+```
+Clustering is restored by batch correction. However, the separation of clusters is visually more difficult to detect. 
+
+# Differential fitness analysis- no correction for plasmid counts
+
+This initial analysis indicated an enrichment of plasmid counts. It is included here to illustrate the analysis process from the standard edgeR approach to the adapted one.
+
+## Fit the model Specify design
+
+```{r}
+# redefine design matrix because for the modelling you want to account for batch effects in the linear model
+designMat <- model.matrix(~0+group+replicate)# model without intercept
+colnames(designMat) <- colnames(designMat) %>% sub("group", "", .) # remove group from groupOUTPUT
+contrast<- makeContrasts(OUTPUT-INPUT, levels=designMat) 
+```
+
+## Estimate dispersion+ include offset
+
+```{r, echo=FALSE}
+dgList <- estimateDisp(dgeAll, design=designMat) # first all dispersions needed
+```
+
+### Conduct the analysis
+
+```{r, echo=FALSE}
+# DE analysis
+fitNF <- glmQLFit(dgList, designMat, robust=TRUE) # Fit a quasi-likelihood negative binomial glm, conduct genewise statistical tests 
+
+# conduct an F-test based multiple comparison test
+qlfNF<- glmQLFTest(fitNF, contrast=contrast) # empirical Bayes quasi-likelihood F-tests > stricter error rate control as it accounts for uncertainty in dispersion
+```
+
+Note: summary statistics of the model fit is also the same as before (same median/mean df.prior)
+
+### Get result table and format results
+
+```{r, echo=FALSE}
+# Extract rsults
+resultNF<- topTags(qlfNF, length(pseudoNormCounts)) # get all genes +their gene names (orders in order of FDR value)
+
+#  get results and assign gene information
+resultNF<-resultNF$table 
+
+# format
+resultNF$gene_name<-meta_data$com_id[match(resultNF$genes, meta_data$locus_tag)]
+resultNF$gene_function<-meta_data$description[match(resultNF$genes, meta_data$locus_tag)]
+```
+
+### Plot data
+
+First load regulon data to get SPI locus tags
+
+```{r, echo=FALSE}
+# get file with regulons for plotting
+regulons <-fread(paste0(data_dir,"Salmonella_regulons.csv"), data.table=F)
+```
+
+Plot MDA
+
+```{r,echo=FALSE}
+# make pretty plots
+# add DE category
+resultNF$DE<-ifelse(resultNF$FDR<0.05& resultNF$logFC<0,"Attentuated",ifelse(resultNF$FDR<0.05& resultNF$logFC>0,"Amplified", "FDR>0.05"))
+resultNF$spi<-ifelse(resultNF$genes %in% regulons[,"SPI-1"],"SPI-1", 
+                        ifelse(resultNF$genes %in% regulons[,"SPI-2"],"SPI-2", 
+                               ifelse(resultNF$genes %in% regulons[,"SPI-3"],"SPI-3", 
+                                      ifelse(resultNF$genes %in% regulons[,"SPI-4"],"SPI-4",
+                                             ifelse(resultNF$genes %in% regulons[,"SPI-6"],"SPI-6",
+                                                    ifelse(resultNF$genes %in% regulons[,"SPI-9"],"SPI-9",
+                                                           ifelse(resultNF$genes %in% regulons[,"SPI-12"],"SPI-12",
+                                                                  ifelse(resultNF$genes %in% regulons[,"SPI-13"],"SPI-13",
+                                                                         ifelse(resultNF$genes %in% regulons[,"SPI-16"],"SPI-16","-")))))))))
+
+resultNF$Plasmid<-ifelse(grepl("*_P1_*",resultNF$genes),"pSLT",
+                       ifelse(grepl("*_P2_*",resultNF$genes),"pCol1B9",
+                              ifelse(grepl("*_P3_*",resultNF$genes) ,"pRSF1010","Chromosome")))
+
+#plot DE analysis
+
+MDA_TMM <- ggplot(resultNF) +
+  geom_point(data=resultNF[which(resultNF$DE == "Amplified"),],aes(x=logCPM,y=logFC,colour='Amplified'),shape=21, stroke=2,size=5, alpha=3/4)+ 
+  geom_point(data=resultNF[which(resultNF$DE == "Attentuated"),],aes(x=logCPM,y=logFC,colour='Attentuated'),shape=21, stroke=2, size=5, alpha=3/4) +
+  geom_point(data=resultNF[which(resultNF$DE == "FDR>0.05"),],aes(x=logCPM,y=logFC,colour='FDR>0.05'),shape=21, size=5,alpha = 1/3)+
+  geom_point(data=resultNF[which(resultNF$Plasmid == "pSLT"),],aes(x=logCPM,y=logFC,colour='pSLT'),shape=16, size=5,alpha = 2/3)+
+  geom_point(data=resultNF[which(resultNF$Plasmid== "pCol1B9"),],aes(x=logCPM,y=logFC,colour='pCol1B9'),shape=16, size=5,alpha = 2/3)+
+  geom_point(data=resultNF[which(resultNF$Plasmid== "pRSF1010"),],aes(x=logCPM,y=logFC,colour='pRSF1010'),shape=16, size=5,alpha = 2/3)+
+  geom_hline(yintercept=c(0,1,-1),linetype="dashed", color = c("black", "lightgrey","lightgrey"))+
+  scale_color_manual("", values=c("#440154FF", "#414487FF" ,"darkgrey", "#22A884FF", "#7AD151FF" ,"#EAA725AF")) +
+  scale_size_manual("Log2FC Fitness", values=c(7,4)) +
+  scale_x_continuous("Average expression log2(cpm)") +
+  scale_y_continuous("Log2FC (Output/Input)") +
+  theme_classic() +
+  theme(axis.text=element_text(size=30,color="black"),
+        axis.title=element_text(size=40,color="black",face="bold"),
+        plot.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification=c("left","top"))
+print(MDA_TMM)
+cairo_pdf(paste0(images, "TraDIS_MDA_noCor.pdf"), width = 10, height = 10) # have issues with paste so will jsut specify the whole pathway name
+print(MDA_TMM)
+dev.off()
+png(paste0(images, "TraDIS_MDA_noCor.png"), width = 3000, height = 3000, res=300)
+print(MDA_TMM)
+dev.off()
+
+```
+
+# Correct analysis for plasmid bias
+
+**This is the final analysis with results used in later steps.!** The large number of plasmid genes indicated that plasmid counts were systemically higher and unlikely to represent "true" fitness effects. Thus, I corrected for the average plasmid logFC by adding the average logFC that was predicted in the initial analysis to the offset matrix only in columns and rows that belong to plasmid genes of output samples. I tested the procedure using without correcting for plasmid counts first and this returned the same results as the standard edgeR analysis.
+
+## Initialise edgeR
+
+Initialise matrices for matrix operations to get the effective library sizes Reason: EdgeR models the offset as library size TMM normalisation factor to obtain an effective library size.
+
+### Get library size and TMM factors
+
+This step is needed for later operations
+Here I make matrix of TMM factors 
+```{r}
+# get TMM NF matrix 
+nf<-dgeAll$samples$norm.factors # make a vector with the  TMM factors (normalisation factors=nf)
+nf_matrix<-matrix(c(nf), ncol=length(dgeAll$counts[1,]),nrow=length(dgeAll$counts[,1]), byrow = TRUE)  # make a matrix with TMM factors
+rownames(nf_matrix) <- rownames(dgeAll$counts) #assign rownames= genes
+colnames(nf_matrix)<-colnames(dgeAll$counts) #assign colnames= samples
+
+# #  get the library size
+lib_size<-nf_matrix # matrix of same size as TMM matrix 
+for (i in 1:18){
+  lib_size[,i]<-dgeAll$samples$lib.size[i] #or *nf_matrix[,i] if corrected for TMM
+}
+```
+
+### Get offset matrix with corrected TMM factors
+
+Here I take the log2 of the normalisation factors because the factor that I have to add is also on a log scale (log2FC)
+```{r}
+offstlogPl123<-log2(nf_matrix+0.1)  # get log TMM matrix to make the scale the same as log2FCs
+
+#  get plasmid genes
+avPlasmidLFC1<-resultNF[grepl("_P1_*",resultNF$genes),] 
+avPlasmidLFC2<-resultNF[grepl("_P2_*",resultNF$genes),] 
+avPlasmidLFC3<-resultNF[grepl("_P3_*",resultNF$genes),]
+
+# Add plasmid mean to TMM factor for plasmid genes in output samples
+offstlogPl123[grepl("_P1_*",rownames(nf_matrix)),c(4:6,8,10,12,14,16,18)]<-offstlogPl123[grepl("_P1_*",rownames(nf_matrix)),c(4:6,8,10,12,14,16,18)]+ mean(avPlasmidLFC1$logFC) # correct P1
+
+offstlogPl123[grepl("_P2_*",rownames(nf_matrix)),c(4:6,8,10,12,14,16,18)]<-offstlogPl123[grepl("_P2_*",rownames(nf_matrix)),c(4:6,8,10,12,14,16,18)]+ mean(avPlasmidLFC2$logFC) # correct P2
+
+offstlogPl123[grepl("_P3_*",rownames(nf_matrix)),c(4:6,8,10,12,14,16,18)]<-offstlogPl123[grepl("_P3_*",rownames(nf_matrix)),c(4:6,8,10,12,14,16,18)]+ mean(avPlasmidLFC3$logFC)# correct P3
+```
+
+### Use plasmid corrected TMM factors to calculate cpm corrected counts
+Here I back transform log2 TMM factors and calculate corrected log cpm counts.
+```{r,echo=FALSE, fig.show='hide'}
+# Get normalised counts
+nf_new2<-2^(offstlogPl123)-0.1 #-0.1 for correcting for logarithm+0.1
+normcounts_offstP123<-dgeAll2$counts/(lib_size*nf_new2)*1000000 # get cpm normalised counts 
+logNormcounts_offstP123<-log2(normcounts_offstP123+1) # get log transformed normalised counts
+```
+
+### PCA w. offset and replicate correction (batch effect removal for plotting only)
+PCA to show that correction does not affect clustering.
+```{r}
+# design mat was already defined
+logCPMc <- removeBatchEffect(logNormcounts_offstP123, batch=c("R1","R2","R3","R1","R2","R3","R4","R4","R5","R5","R6","R6","R7","R7","R8","R8","R9","R9"), design=designBatchCor)
+
+library(ggrepel)
+pdf(paste0(images,"PCA_TMM_norm_PlasmidANDBatchCorrected.pdf"), width = 10, height =8)
+logcounts <- logCPMc 
+pca_raw <- stats::prcomp(t(logcounts))  # :: helps you to access specific package in r (here stats:) then apply pcrcomps to transposed logcounts
+pca_df <- cbind(pca_raw$x %>% as.data.frame(),   # make a PCA df by cbind (column bind), make it a df with x=PCA components  and add a column with sample_names
+                sample=rownames(pca_raw$x))
+pca_df$Condition <- sample_info$Condition[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+pca_df$replicate <- sample_info$replicate[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+pca_df$Batch <- sample_info$Batch[match(pca_df$sample, sample_info$identifier)] # assign meta data to the sample
+
+pca_imp <- summary(pca_raw)$importance[2,] # summary statistics of the PCA statistics--> importance probably gives variance xplained?
+
+# plot the PCA1 and PCA2
+PCA_logCPMc_o <- ggplot(pca_df, aes(x=PC1, y=PC2, label=ifelse(replicate=="1",as.character(replicate),''), col=factor(Condition))) +
+  geom_point(aes(shape=Batch), size=6) +
+  geom_text_repel(box.padding = 0.5,max.overlaps = Inf,position = position_jitter(0.2, seed = 2), show.legend = FALSE, size=10)+
+  scale_color_manual("Condition", values=viridis(3)) +
+  scale_size_manual("", values=c(7,4)) +
+  scale_x_continuous(name=paste0("PC1 (", round(pca_imp[1]*100), "%)")) +
+  scale_y_continuous(name=paste0("PC2 (", round(pca_imp[2]*100), "%)")) +
+  theme_classic() +
+  theme(axis.text=element_text(size=30),
+        axis.title=element_text(size=40),
+        plot.title=element_blank(),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="top",
+        legend.box="vertical",
+        legend.margin=margin())
+print(PCA_logCPMc_o)
+dev.off()
+```
+Format and save normalised counts
+```{r}
+heatmapTMMlogCPMc_o<-plot_heatmap(counts_tab=logCPMc,logcpm=T,meta=meta_data,n_genes=length(normCounts[,1]),DE=F,fname=paste0(images, "TraDIS_heatmap_PlasmidCorBatchCorTMM_All_genes"))
+```
+
+```{r, echo=FALSE}
+## get norm counts and save as excel file in case I want to use them for the data base
+library(readr)
+## save as excel file
+write_csv(as.data.frame(logNormcounts_offstP123),paste0(excel, "plasmid_normalised_log2cpm.csv"))
+write.csv(logCPMc,paste0(excel, "plasmid_normalised_log2cpmBatchCorrected.csv"), row.names =T)
+```
+
+# Differential fitness analysis
+
+## Calculate the effective library size
+The effective library size is calculated by calculating the corrected TMM factors in nf_new2 with library sizes per sample.Then the log of the effective library size is taken and added to the model as offset. EdgeR uses the natural log for this step NOT log2!
+```{r}
+eff_lib_pl123<-nf_matrix
+for (i in 1:18){
+  eff_lib_pl123[,i]<-dgeAll$samples$lib.size[i]*nf_new2[,i] # multiply library size by new normalisation factor 
+}
+dgeAll$offset<-offset(log(eff_lib_pl123)) # take natural log because edgeR needs natural log library size 
+```
+
+## Calculate dispersion
+
+```{r}
+dgList2 <- estimateDisp(dgeAll, design=designMat) # first all dispersions needed
+```
+
+## Fit the model and conduct multiple comparison testing
+
+```{r}
+#Fit the model 
+fitPl123 <- glmQLFit(dgList2, designMat, robust=TRUE) # Fit a quasi-likelihood negative binomial glm
+
+# conduct an F-test based multiple comparison test
+qlfPl123<- glmQLFTest(fitPl123, contrast=contrast) 
+```
+
+## Explore the results
+
+```{r, echo=FALSE,include=FALSE}
+# Extract the top DE genes 
+resultPl123<- topTags(qlfPl123, length(pseudoNormCounts)) # get all genes
+
+# get a df with all the results and add relevant information
+resultPl123<-resultPl123$table
+resultPl123$gene_name<-meta_data$com_id[match(resultPl123$genes, meta_data$locus_tag)]
+resultPl123$gene_function<-meta_data$description[match(resultPl123$genes, meta_data$locus_tag)]
+names(resultPl123)[names(resultPl123)=="genes"]<-"locus_tag"
+```
+
+
+Check bottleneck
+
+```{r}
+resultDE<-resultPl123[resultPl123$FDR<0.05,]
+pseudoDE<-resultDE[rownames(resultDE) %in% subset(meta_data, type=="pseudo")$locus_tag,] # None
+length(pseudoDE[,1])
+```
+
+No pseudogenes with fitness effect.
+
+Look at the distribution of logFCs to determine possible cut off threshold
+
+```{r}
+library(ggridges)
+resultPl123_1<-resultPl123
+resultPl123_1$model<-""
+resultPl123_1$DE<-ifelse(resultPl123_1$FDR<0.05, "Yes", "No")
+
+pdf(paste0(images,"Density_distributions_DF_effects.pdf"), width = 30, height =25)
+density<-ggplot(resultPl123_1, aes(x=logFC, y=model,group = interaction(DE, model), fill = DE)) +
+  geom_density_ridges(alpha=0.5) +
+  theme_ridges() + 
+  theme(axis.text.y=element_text(size=20,color="black"),
+        axis.title.y = element_blank(),
+        axis.text.x=element_text(size=20,color="black"),
+        axis.title.x=element_text(size=30,color="black",hjust=0.5, vjust=0.9,face="bold"),
+        plot.title=element_blank(),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification = c("left","top"),
+        legend.box="vertical",
+        legend.margin=margin(),
+        axis.line = element_line(color = "black"))+
+  guides(fill=guide_legend(title="Fitness effect:"))+
+  xlab("Log2FC (Output/Input)")+
+  scale_fill_manual("DE",values=c("#440154FF", "#21908CFF"))+
+  geom_vline(xintercept=c(-0.3,0,0.3),linetype="dashed",linewidth=2, color = c("#31688EFF", "darkgrey","#31688EFF"))+
+  scale_x_continuous(limits = c(min(resultPl123_1$logFC)-0.5, max(resultPl123_1$logFC)+0.5), breaks = seq(-6, 2, by = 0.5))
+print(density)
+```
+
+##Make nice plots
+
+Annotate results for plotting
+
+```{r ,echo=FALSE}
+# make pretty plots
+resultPl123$DE<-ifelse(resultPl123$FDR<0.05& resultPl123$logFC<0,"Attenuated",ifelse(resultPl123$FDR<0.05& resultPl123$logFC>0,"Amplified", "FDR>0.05"))
+resultPl123$spi<-ifelse(resultPl123$locus_tag %in% regulons[,"SPI-1"],"SPI-1", 
+                        ifelse(resultPl123$locus_tag %in% regulons[,"SPI-2"],"SPI-2", 
+                               ifelse(resultPl123$locus_tag %in% regulons[,"SPI-3"],"SPI-3", 
+                                      ifelse(resultPl123$locus_tag %in% regulons[,"SPI-4"],"SPI-4",
+                                             ifelse(resultPl123$locus_tag %in% regulons[,"SPI-6"],"SPI-6",
+                                                    ifelse(resultPl123$locus_tag %in% regulons[,"SPI-9"],"SPI-9",
+                                                           ifelse(resultPl123$locus_tag %in% regulons[,"SPI-12"],"SPI-12",
+                                                                  ifelse(resultPl123$locus_tag %in% regulons[,"SPI-13"],"SPI-13",
+                                                                         ifelse(resultPl123$locus_tag %in% regulons[,"SPI-16"],"Spi-16","-")))))))))
+
+resultPl123$DNA_molecule<-ifelse(grepl("*_P1_*",resultPl123$locus_tag),"pSLT",
+                       ifelse(grepl("*_P2_*",resultPl123$locus_tag),"pCol1B9",
+                              ifelse(grepl("*_P3_*",resultPl123$locus_tag) ,"pRSF1010","Chromosome")))
+
+```
+
+15 plasmid genes with fitness effects remain
+
+MD plot 
+
+```{r, echo=FALSE}
+#plot DE analysis
+MDA_TMM_o <- ggplot(resultPl123) +
+  geom_point(data=resultPl123[which(resultPl123$DE == "Amplified"),],aes(x=logCPM,y=logFC,colour='Amplified'),shape=21, stroke=2,size=5,alpha=3/4)+ 
+  geom_point(data=resultPl123[which(resultPl123$DE == "Attenuated"),],aes(x=logCPM,y=logFC,colour='Attenuated'),shape=21, stroke=2,size=5,alpha=3/4) +
+  geom_point(data=resultPl123[which(resultPl123$DE == "FDR>0.05"),],aes(x=logCPM,y=logFC,colour='FDR>0.05'),shape=21,stroke=2, size=5,alpha = 1/3)+
+  geom_point(data=resultPl123[which(resultPl123$DNA_molecule == "pSLT"),],aes(x=logCPM,y=logFC,colour='pSLT'),shape=16, size=5,alpha = 2/3)+
+  geom_point(data=resultPl123[which(resultPl123$DNA_molecule=="pCol1B9"),],aes(x=logCPM,y=logFC,colour='pCol1B9'),shape=16, size=5,alpha = 2/3)+
+  geom_point(data=resultPl123[which(resultPl123$DNA_molecule== "pRSF1010"),],aes(x=logCPM,y=logFC,colour='pRSF1010'),shape=16, size=5,alpha = 2/3)+
+  geom_hline(yintercept=c(0,1,-1),linetype="dashed", color = c("black", "lightgrey","lightgrey"))+
+  scale_color_manual("", values= c("#440154FF", "#414487FF" ,"darkgrey", "#22A884FF", "#7AD151FF" ,"#EAA725AF"))+
+  scale_size_manual("Log2FC Fitness", values=c(7,4)) +
+  scale_x_continuous("Average expression log2(CPM)") +
+  scale_y_continuous("Log2FC (Output/Input)") +
+  theme_classic() +
+  theme(axis.text=element_text(size=30,color="black"),
+        axis.title=element_text(size=40,color="black",face="bold"),
+        plot.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification=c("left","top"),
+        legend.box="vertical",
+        legend.margin=margin())
+print(MDA_TMM_o)
+cairo_pdf(paste0(images, "TraDIS_DE_P1P2P3Cor.pdf"), width = 10, height = 10) # have issues with paste so will jsut specify the whole pathway name
+print(MDA_TMM_o)
+dev.off()
+png(paste0(images, "TraDIS_MDA_P1P2P3Cor.png"), width = 3000, height = 3000, res=300)
+print(MDA_TMM_o)
+dev.off()
+```
+
+Vulcano plot
+```{r}
+plot_data<-resultPl123
+  pdf(paste0(images,"Figure_DE_vulcano.pdf"), width = 25, height = 20)
+  vulcano<-ggplot(data =plot_data , aes(x = logFC, y = -log10(FDR),col = DE)) +
+    geom_point(alpha=0.4,size=6.5)+
+     geom_point(data=resultPl123[1:15,],aes(x=logFC,y=-log10(FDR),colour='Pur genes'),alpha = 1,size=6.5)+
+    geom_point(data=resultPl123[which(grepl("hfq",resultPl123$gene_name)==T|grepl("pur",resultPl123$gene_name)==T),],aes(x=logFC,y=-log10(FDR),colour='Pur genes'),alpha = 1,size=6.5)+
+    geom_point(data=resultPl123[which(resultPl123$FDR >0.05 & resultPl123$spi== "SPI-1"),],aes(x=logFC,y=-log10(FDR),colour='SPI-1'),alpha = 1,size=6.5)+
+    geom_point(data=resultPl123[which(resultPl123$FDR <0.05 & abs(resultPl123$logFC)>=0.3&resultPl123$spi == "SPI-1"),],aes(x=logFC,y=-log10(FDR),colour='SPI-1'),alpha = 1,size=6.5)+
+    theme_set(theme_classic(base_size = 50) +
+              theme(
+                axis.text= element_text(size= 50, color = 'black'),
+                axis.title.y = element_text(hjust = 0.5,face = "bold", margin = margin(0,20,0,0), size = rel(1.1), color = 'black'),
+                axis.title.x = element_text(hjust = 0.5, margin = margin(20,20,0,0), size = rel(1.1),face = "bold", color = 'black'),
+                plot.title = element_text(hjust = 1),
+                legend.title=element_text(size=50,face="bold",color="black"),
+                legend.text=element_text(size=50,color="black"),
+                legend.position="right",
+                legend.justification = c("left", "top")))+
+                geom_vline(xintercept = c(-0.3, 0.3), col = "black",lwd=2, linetype = 'dashed') +
+                geom_hline(yintercept = -log10(0.05), col = "darkgray", linetype = 'dashed') +
+                scale_color_manual(values = c("Amplified"="#38598CFF",
+                                              "Attenuated"="#440154FF", 
+                                              "FDR>0.05"="grey", 
+                                              "SPI-1"= "#A50026",
+                                              "Pur genes"= "#FBA238FF"),breaks=c("Amplified","Attenuated", "FDR>0.05", "SPI-1")) + # to set the colours of our variabe
+                scale_x_continuous(breaks=seq(-5,2,0.5))+
+                guides(color=guide_legend(title=""))+
+    geom_text_repel(label=ifelse(abs(plot_data$logFC)>=0.3&plot_data$FDR<0.05& grepl("pur",plot_data$gene_name)==T| grepl("hfq",plot_data$gene_name)==T| plot_data$gene_name %in% resultPl123$gene_name[1:15],plot_data$gene_name,''),box.padding = 0.3,max.overlaps = Inf,position = position_jitter(0.1, seed = 2), show.legend = FALSE,col="black",fontface = "bold", size=15)
+  print(vulcano)
+  dev.off()
+
+```
+
+Make a heatmap I used this plot to make one of all genes with fitness effects and one for the top 30 by changing the range
+
+### NEW HEATMAP for logFCs
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(pheatmap)
+plot_heatmap2 <- function(counts_tab, res, meta, n_genes = 10, annotation, fname, DE = TRUE) {
+    # Add the gene names to the data
+  # order the top values and get the
+  logCPM <- data.frame(edgeR::cpm(dgeAll, prior.count=1, log=TRUE)) # log transform values and take cpm , +2 to avoid undefined log2(0)
+
+  logCPM <-logCPM[,c(1,4,2,5,3,6,7:18)] # make order of columns nicer
+  if (DE){
+    logCPM$FDR<-res$FDR[match(rownames(logCPM),res$locus_tag)]
+    o <- order(logCPM$FDR) # returns indices of P-values in sorted manner
+    logCPM <-logCPM[o[1:n_genes],] # plot top genes --> select desired range
+    logCPM<-logCPM[,c(1:length(logCPM[1,])-1)] %>% as.matrix() # remove FDR column
+    write.csv(logCPM,paste(excel,"heatmap_DE.csv"))
+ }
+  logCPM <- t(scale(t(logCPM))) # scale to mean 0 and sd 1
+  
+  # Create the heatmap annotation
+ 
+  if (DE){
+    #row annoations
+    annotation_row = data.frame(Genes=rownames(logCPM))
+    rownames(annotation_row)<-annotation_row$Genes
+    annotation_row$logFC<-res$logFC[match(rownames(logCPM),res$locus_tag)]
+    annotation_row<-annotation_row$logFC %>% as.data.frame(row.names = rownames(annotation_row))
+    colnames(annotation_row)="LogFC"
+  }
+  else{
+    annotation_row=NA
+  }
+ # ann_colors = list(
+  #   Condition = c(Input = "grey", Output = "#000004FF"),
+  #   LogFC=colorRampPalette(c("navy","#F7F7F7","#A50026"))(50))#col_fun(annotation_row$LogFC))#
+ # Define a custom color scale centered around 0
+  # logFC_colors <- colorRamp2(
+  #   c(-max(abs(annotation_row$LogFC)), 0, max(abs(annotation_row$LogFC))),
+  #   c("blue", "white", "red")
+  # )
+ # Define columns annotation
+  column_ha = HeatmapAnnotation(Condition = factor(rep(c("Input", "Output"), 9)),col=list(Condition=c("Input"="grey","Output"="black")))
+
+  # Create the heatmap
+  heatmap <- Heatmap(
+    logCPM,
+    col = colorRampPalette(c("#38598CFF", "#F7F7F7", "#440154FF"))(50),
+    cluster_rows = TRUE,
+    cluster_columns = TRUE,
+    column_title = NA,
+    top_annotation = column_ha,
+    clustering_method_rows = "ward.D2",
+    clustering_method_columns = "ward.D2",
+    column_km = 2,
+    row_km = 2,
+    show_row_names = F,
+    show_column_names = F,
+    show_row_dend = FALSE,
+    clustering_distance_rows = "euclidean"
+  )
+
+  # Add the dynamic row annotation using column annotation
+  anno_row <- HeatmapAnnotation(
+    LogFC = anno_barplot(annotation_row$LogFC,baseline=0),
+    which = "row"
+  )
+  heatmap <- heatmap + anno_row
+  
+  # Print the heatmap
+  print(heatmap)
+
+  # Save the heatmap to PDF and PNG files
+  pdf(paste0(fname, ".pdf"), width = 6, height = 6)
+  draw(heatmap)
+  dev.off()
+
+  png(paste0(fname, ".png"), width = 2000, height = 2000, res = 300)
+  draw(heatmap)
+  dev.off()
+
+  return(heatmap)
+}
+```
+
+Make a heatmap using the plasmid and TMM normalised counts and abs(logFC)>=0.3
+
+```{r}
+# plot
+macrophagesDE<-resultPl123[resultPl123$FDR<0.05&abs(resultPl123$logFC)>=0.3,] # for later use
+heatmap2<-plot_heatmap2(counts_tab=dgeAll,res=resultPl123,meta=meta_data,n_genes=length(macrophagesDE[,1]),annotation=resultPl123,fname=paste0(images, "TraDIS_heatmap_DE_plasmidcorrected_abslogFC"))
+```
+
+Format results
+
+```{r, include=FALSE}
+# save results
+resultPl123<-resultPl123[,c(1,7:11,2:6)] # save for me
+names(resultPl123)[names(resultPl123)=="genes"]<-c("locus_tag")
+resultPl123_o<-resultPl123[,c(1:2,6:11)]
+```
+
+# Investigate plasmid repliciation rates
+
+The differential fitness analysis showed that plasmid counts differed between input and output samples. To further investigate this,the differences between chromosomal genes and plasmids were plotted.In the following section plasmid logFC ratios are plotted once with correction for the mean logFC using the corrected log normalised counts derived in previous steps and once without the correction only using TMM normalisation. Data used to make the plots is saved.
+
+## Initialise variables for plotting
+
+Get chromosome replication rate (only needs to be calculated once because they did not change during normalisation)
+
+```{r, echo=FALSE}
+# load packages 
+library("matrixStats")
+library("statmod")
+
+calc_logFC<-function(data){
+  #This function calculates the median logFCs of every gene in the data set and returns the median logFC of each replicate per genetic element
+  #Chr
+  Chromosome<-colMedians(data[!grepl("_P1_*|_P2_*|_P3_*",rownames(data)),c(4:6,8,10,12,14,16,18)]-data[!grepl("_P1_*|_P2_*|_P3_*",rownames(data)),-c(4:6,8,10,12,14,16,18)]) # output-input
+  # calculate medians
+  #P1
+  pSLT<-colMedians( data[grepl("_P1_*",rownames(data)),c(4:6,8,10,12,14,16,18)]-data[grepl("_P1_*",rownames(data)),-c(4:6,8,10,12,14,16,18)]) #output- input
+
+  #P2
+  pCol1B9<-colMedians(data[grepl("_P2_*",rownames(data)),c(4:6,8,10,12,14,16,18)]-data[grepl("_P2_*",rownames(data)),-c(4:6,8,10,12,14,16,18)])
+  
+  #P3
+  pRSF1010<-colMedians(data[grepl("_P3_*",rownames(data)),c(4:6,8,10,12,14,16,18)]-data[grepl("_P3_*",rownames(data)),-c(4:6,8,10,12,14,16,18)])
+  
+  # bind values and return dataframe
+  TMM_plot<-rbind(pSLT,pCol1B9,pRSF1010,Chromosome) %>% as.data.frame()
+  colnames(TMM_plot)<-c(paste0("R",1:9,""))
+  TMM_plot$molecule<-rownames(TMM_plot) 
+  TMM_plot<-pivot_longer(TMM_plot,cols=1:9,names_to="Replicate", values_to="LogFC")
+  TMM_plot$molecule<-factor(TMM_plot$molecule)
+  return(TMM_plot)
+}
+# plot molecule function
+plasmid_plot<- function(data, x, y, fill2, fname){
+png(fname, width = 3000, height =3000, res=300)
+p<-ggplot(data, aes(x=factor(x), y=y, fill=factor(fill2))) +
+    geom_violin(position = position_dodge(width = 0.75), alpha = 0.5, outlier.colour = "transparent") +
+    scale_fill_viridis(discrete=T, name="") +
+   theme(axis.text=element_text(size=20,color="black"),
+      axis.title.x = element_text(color="black", size=20),
+      axis.title.y = element_blank(),
+      plot.title=element_text(size=20,face="bold",hjust = 0.4), # higher hjust value  here causes horizontal adjustment to left side
+      legend.text=element_text(size=20),
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.position = "none",
+      legend.key=element_blank(),
+      legend.margin = margin(2,2,2,2),
+      legend.box = "vertical",
+      legend.key.size = unit(0.3, "cm"))+
+  geom_point(position = position_jitter(width = 0.2, seed = 2),size=3.5, alpha=0.5)+
+  ylab("Median Log2FC")+
+  scale_fill_manual(values=c("#440154AF", "#31688EFF", "#35B779FF" ,"#EDE725AF")) +
+  coord_flip()
+print(p)
+}
+
+
+```
+
+Note: Replicate rates differ per sample, especially for replicate 3.
+
+### Plot uncorrected data (TMM only)
+
+```{r}
+TMM_plot<-calc_logFC(pseudoNormCounts)
+plasmid_plot(data=TMM_plot,x=TMM_plot$molecule,y=TMM_plot$LogFC,fill=TMM_plot$molecule, fname=paste0(images, "TraDIS_DE_uncorrected_TMM.png"))
+
+# save data underlying plots
+write.csv(TMM_plot,paste0(excel,"Macro_PlasmidlogFCs.csv")) # uncorrected
+```
+
+# Pathway analysis
+
+To obtain insight into the biological processes associated with intramacrophage infection a pathway analysis was  conducted. Therefore, GO and KEGG terms associated with each gene were obtained, GO and KEGG terms filtered based on hierachy and size and then camera() was used which is an edgeR function that includes gene correlation into the pathway analysis
+
+## Load packages
+
+```{r,echo=FALSE}
+## CRAN
+library('RColorBrewer')
+library("writexl")
+library('KEGGREST')
+library('GO.db')
+```
+
+## Read eggnog file and counts file
+
+```{r,echo=FALSE}
+# # prepare pathway analysis
+
+# import data from bio-tradis output files and create count table
+fcn <- read.table(paste(data_dir, "salmonella_egnogg_febr23.tsv", sep=""), header=F, sep="\t", quote="", stringsAsFactors=F) # eggnog file
+rownames(fcn) <- fcn$V1 # V1= gene names
+
+tab <- counts_tab%>% as.data.frame() #gene counts
+```
+
+## Get your custom gene set
+
+### Obtain KEGG and GO terms from Eggnog file
+
+```{r}
+# associative array function
+hash <- function( keys ) {
+    result <- new.env( hash = TRUE, parent = emptyenv(), size = length( keys ) )
+    for( key in keys ) {
+        result[[ key ]] <- NA
+    }
+    return( result )
+}
+
+id_kegg_hash <- hash(rownames(tab)) #initialize id hash
+id_kegg_hash <- fcn$V13[match(rownames(tab), fcn$V1)] #fill KEGG Pathway
+id_name_hash <- hash(rownames(tab))
+id_name_hash <- fcn$V9[match(rownames(tab), fcn$V1)] # match gene name
+
+id_go_hash <- hash(rownames(tab))
+id_go_hash <- fcn$V10[match(rownames(tab), fcn$V1)] # fill in GO ID
+id_gname_hash <- hash(rownames(tab))
+id_gname_hash <- fcn$V9[match(rownames(tab), fcn$V1)] #match gene name
+
+l <- strsplit(fcn[,13], ",") # split KEGG field list
+l <- unlist(l) # flatten list
+l <- unique(l) # get unique entries
+l <- l[grep("map", l)]
+
+all_paths <- l
+
+kegg_hash <- hash(l) # initialize name hash
+
+
+kegg_hash <- sapply(l, function(x){ #fill name hash with KEGGREST
+    tryCatch(keggGet(x)[[1]]$NAME, error=function(e) e) # needed to use this otherwise it gave an error
+})
+
+l <- strsplit(fcn[,10], ",") # split GO field list
+l <- unlist(l) # flatten list
+l <- unique(l) # uniqify
+
+all_paths <- c(all_paths, l)
+
+GO_hash <- hash(l)
+GO_hash <- sapply(l, function(x) toString(Term(x)))
+```
+
+## Create pathway indices
+
+```{r, eval=F}
+# Create binary list which contains pathways with more than 10 genes present in the RNAseq data
+pathway_indices <- lapply(all_paths, function(x) {
+  if(grepl("map", x)) {
+    sapply(dgList2$genes, function(y) ifelse(y %in% rownames(fcn), grepl(x, fcn[y,13]), F)) %>% as.vector()
+  } else {
+    sapply(dgList2$genes, function(y) ifelse(y %in% rownames(fcn), grepl(x, fcn[y,10]), F)) %>% as.vector()
+  }
+})
+names(pathway_indices) <- all_paths
+setNull <- sapply(pathway_indices, function(x) sum(x)<10) # get only pathways with more than 10 gene counts
+pathway_indices[which(setNull)] <- NULL
+write.csv(do.call(rbind, pathway_indices) * 1, paste0(data_dir, "pathway_indices.csv"), quote=F)
+```
+
+## Load pathway file for downstream analyses
+
+```{r}
+# load binary matrix with pathways and genes
+pathway_file <- paste0(data_dir, "pathway_indices.csv")
+pathway_indices <- (read.csv(pathway_file, quote="", row.names=1) == 1)
+pathway_indices <- setNames(split(pathway_indices, seq(nrow(pathway_indices))), rownames(pathway_indices))
+```
+
+Comment: Until here it was Lars' script
+
+## Next parts: my script for filtering
+
+### Load packages
+
+```{r}
+library(purrr)
+library(stringr)
+```
+
+## FILTERING*
+
+## Hierachical filtering of GO terms before use
+
+Get offspring terms using GOXXOFFSRPING
+
+I decided to conduct hierachical filtering first by excluding terms with too many offspring terms. The code is probably overly complicated but it works..
+
+In the following the GO-term names are extracted from the pathway list. Then the ontology class for each term is extracted which is needed to use GO[XX]OFFSPRING to identify the number of offspring terms for each GO-term. The outcome is a list of offspring terms associated with each GO-term.
+
+```{r}
+# Get pathway list names and list of GO-terms
+Pathway_list<-names(pathway_indices)%>% as.data.frame() # get all pathways in indice list
+Go_terms<-Pathway_list[grepl("GO*",Pathway_list[,1]),] # get all GO terms 
+
+## Filter GO-terms from pathway list based on number of Offspring 
+
+#inititalise list
+Offspring_list <- list()  
+
+# get Offspring using GOBPOFFSPRING --> need to check for all three subcategories of GO
+# Loop through all GO-terms and check their ontology, then look for offspring according to ontology, save result in list with first entry being the parental term
+for (i in 1:length(Go_terms)){
+  if (is.na(startsWith(Ontology(Go_terms[i]), "BP")) |is.na(startsWith(Ontology(Go_terms[i]), "MF")) |is.na(startsWith(Ontology(Go_terms[i]), "CC")) ){ # first check if any of the entries is NA, needed otherwise throws error)
+    Offspring_list[[i]]<-list(Go_terms[i],"obsolete") # terms with NA are obsolete terms in GO-database
+  } else if (startsWith(Ontology(Go_terms[i]), "BP") ){
+      ls<-as.list(tryCatch(get(Go_terms[i], GOBPOFFSPRING), error = function(e) e)) # If BP and catch error
+      Offspring_list [[i]]<-list(Go_terms[i],ls)
+    } else if (startsWith(Ontology(Go_terms[i]), "MF") ){
+      ls<-as.list(tryCatch(get(Go_terms[i], GOMFOFFSPRING), error = function(e) e)) # if MF and catch error
+      Offspring_list [[i]]<-list(Go_terms[i],ls)
+    } else if (startsWith(Ontology(Go_terms[i]), "CC") ){
+      ls<-as.list(tryCatch(get(Go_terms[i], GOCCOFFSPRING), error = function(e) e)) # if CC and catch error
+      Offspring_list [[i]]<-list(Go_terms[i],ls) # first entry saves the parent term, second is list of offspring
+    }
+}
+
+# check for errors
+error_GO<-list()
+for (i in 1:length(Offspring_list)){
+  if (length(Offspring_list [[i]][[2]])==2 &grepl("*not found*",Offspring_list [[i]][[2]][[1]])){
+    error_GO[[i]]<-Offspring_list [[i]][[1]]}
+}
+```
+
+## Filter Offspring
+
+The offspring list is then filtered. Only GO-terms with less than 5 offspring terms are kept,
+
+```{r}
+library(scales)
+## now filter Offspring_list
+# initialise variable
+Offspring_filtered<-list()
+
+# filter GO_terms according to the number offspring by looping through list and delete terms with 'obsolete' values
+for (i in 1:length(Offspring_list)){
+  if (length(Offspring_list [[i]][[2]])<5){ # filter for number of allowed offspring terms
+      if (("obsolete" %in% Offspring_list [[i]][[2]])==FALSE) { #dont include obsolete terms
+      Offspring_filtered<-append(Offspring_filtered,Offspring_list [[i]][[1]])}}
+}
+
+# Offspring_filtered<-discard(map(Offspring_filtered, ~ discard(.x, is.null)), is.null) # discard the NULL entries if present
+Offspring_filtered<-unlist(Offspring_filtered) 
+
+```
+
+Now that I have a pre-filtered list:
+
+## Get number of genes per GO-term 
+
+In this pre-filtered list, we now check the size of the GO-terms. To do so, we count the number of genes per GO-term using the eggnog file. Eggnog saves GO-terms in one variable as one string. Thus, the following code, extracts the string, breaks it down and counts individual occurences of the each string.
+
+```{r}
+# Get genes associated with each Go-term from file
+
+## initialise variables
+# make a dataframe where every Go-term entry is split at the , and added as new row
+new_eggnog<-fcn[fcn$V1 %in% rownames(logNormcounts_offstP123),] # only take genes present in my dataset
+new_eggnog<-separate_rows(new_eggnog,sep = ",", V10) # separates file based on GO-terms
+unique_GO<- unique(new_eggnog$V10)%>% matrix  #  get unique GO-term in eggnog
+
+## initialise list in which to save the genes associated with each term
+gene_list<-list()
+gene_l<- list()
+
+# Loop through unique GO-terms and find matching GO-terms by index
+for (i in 1:length(unique_GO)){
+  gene_list[i]<-list(new_eggnog$V1[which(new_eggnog$V10 %in% unique_GO[i])]) # identify gene based on index
+  genes <- gene_list[i] 
+  names(genes) <- unique_GO[i]
+  gene_l<-append(gene_l, genes) # last three lines were needed to save list with GO-term as name of the entry
+}
+rm(gene_list) # not needed anymore
+```
+
+Genes are now saved as character vector in gene_l under their GO-term
+
+Make a dataframe that summarises the information regarding the GO-terms (Number of genes, which genes, Go-term ID)
+
+```{r}
+# GO terms with number of genes and locus_tags per pathwat
+Go_df<-matrix(nrow=length(gene_l),ncol=3)
+for (i in 1:length(gene_l)){
+  Go_df[i,1]<-names(gene_l[i])
+  Go_df[i,2]<-c(length(strsplit(gene_l[[i]], "\\w+"))) # save individual genes as string to enable addition to df, use word character not letters --> w+
+  Go_df[i,3]<-paste(gene_l[[i]],collapse=',')}
+Go_df<-as.data.frame(Go_df)
+
+#some formatting
+colnames(Go_df)<-c("Goterm","Ngenes","locus_tag")
+Go_df$Ngenes<-as.integer(Go_df$Ngenes) # was saved as string
+
+# to get the common and DE gene name
+for (i in 1:length(Go_df[,1])){
+  genes<-strsplit(Go_df$locus_tag[i], ",") %>% as.data.frame() # split string and save as dataframe
+  DE<-macrophagesDE$locus_tag[macrophagesDE$locus_tag %in% genes[,1]]
+  DEg<-macrophagesDE$gene_name[macrophagesDE$locus_tag %in% genes[,1]]
+  genes<-resultPl123$gene_name[match(genes[,1],resultPl123$locus_tag)] # get gene name associated with each locus tag in df
+  Go_df$gene_names[i]<-paste(genes,collapse=',')
+  Go_df$DE_locus[i]<-paste(DE,collapse=',') # all DE genes 
+  Go_df$DE_genes[i]<-paste(DEg,collapse=',')} # all DE genes
+
+```
+
+In the dataframe genes and GO-terms are now associated
+
+##  filter out terms with very high number of genes
+
+```{r}
+## Filter 
+HighN<-Go_df[Go_df$Ngenes>=100,] 
+Offspring_filtered<-Offspring_filtered[!(Offspring_filtered %in% HighN$Goterm)] %>% as.matrix() # only select genes below/equal N=100
+
+```
+
+
+## Filter based on GO term hierachy
+
+Some terms in the filtered list from previous steps might be patental terms of other terms in the list. So, filter out genes in filtered pathway that are parents of another using a similar approach as before using GO[XX]OFFSPRING
+
+```{r}
+## check for children in GO-terms
+## check for children in GO-terms
+par<-list()
+children<-list()
+for (i in 1:length(Offspring_filtered[,1])){
+  if (startsWith(Ontology(Offspring_filtered[i]), "BP") ==TRUE){
+    children<-as.list(tryCatch(get(Offspring_filtered[i], GOBPOFFSPRING), error = function(e) e))
+    idx<-which(Offspring_filtered %in% children)
+  }else if (startsWith(Ontology(Offspring_filtered[i]), "MF") ==TRUE){
+    children<-as.list(tryCatch(get(Offspring_filtered[i], GOMFOFFSPRING), error = function(e) e)) #catch errror if go function is different
+    idx<-which(Offspring_filtered %in% children)
+  }else if (startsWith(Ontology(Offspring_filtered[i]), "CC") ==TRUE){
+    children<-as.list(tryCatch(get(Offspring_filtered[i], GOCCOFFSPRING), error = function(e) e))
+    idx<-which(Offspring_filtered %in% children)
+  } # gets index of child term
+  if(!(identical(idx, integer(0)))){ # if the index is unequal to 0, then the offspring term is a parent
+    par<-append(par,Offspring_filtered[i])}}
+
+Offspring_nopar<-Offspring_filtered[!(Offspring_filtered %in% unlist(par))]
+
+# remove stuff thats not needed
+rm(idx)
+rm(children)
+```
+
+After removing parental terms, 100 GO-terms remain which will be included into the pathway analysis.
+
+## KEGG pathway filtering
+
+Now, we do something similar for the KEGG terms associated with the dataset.
+
+First get KEGG names and description from the kegg_hash variable
+
+```{r}
+# make a variable that has the kegg identifier and pathway description in it
+# initialise the matrix
+keggID<-matrix(c(0), ncol=2,nrow=length(kegg_hash), byrow = TRUE)
+#fill in the matrix
+for (i in 1:length(kegg_hash)){
+  keggID[i,1]<-names(kegg_hash)[i] # get identifier
+  if (length(kegg_hash[[i]])==1){ # only take "real entries"
+    keggID[i,2]<-kegg_hash[[i]] }
+  else{
+    keggID[i,2]<-names(kegg_hash)[i] # take the name,bec. could not find URL
+  }
+}
+
+# make a dataframe
+keggID<-keggID%>% as.data.frame()
+rownames(keggID)<-keggID$V1
+colnames(keggID)<-c("keggNames","Description")
+```
+
+Also get the genes associated with each KEGG pathway. Does the same as the code for the GO-terms
+
+```{r}
+# Use Kegg_hash to V1-266 and look for corresponding gene in new_eggnog$V9 
+#   get unique 
+new_eggnog2<-fcn[fcn$V1 %in% rownames(logNormcounts_offstP123),] # only take genes present in my dataset
+
+# get the genes associated with each kegg term and save in list
+ls_kegg<-list()
+kegg_l<-list()
+for (i in 1:length(1:length(keggID[,1]))){
+  ls_kegg[i]<- list(new_eggnog2$V1[which(str_detect(new_eggnog2$V13,keggID$keggNames[i]))]) # get gene name associated w keggID
+  kegg <- ls_kegg[i]
+  names(kegg) <- keggID$keggNames[i]
+  kegg_l<-append(kegg_l, kegg)}
+
+## add to kegg dataframe
+for (i in 1:length(kegg_l)){
+  keggID$locus_tag[i]<-paste(kegg_l[[i]],collapse=',') # make string
+  keggID$locus_tag[i]<-gsub(',-|-,|-','',keggID$locus_tag[i])# clean up entries
+  keggID$Ngenes[i]<-c(length(strsplit(kegg_l[[i]], "\\w+"))) # count number of words =number of genes
+} # clean up entries
+
+keggID<- keggID[keggID$locus_tag != "",] # drop empty rows
+keggID$Ngenes<-as.integer(keggID$Ngenes) # was saved as string
+
+# remove terms with too many or too few genes
+HighlowN<-keggID[keggID$Ngenes>=200 | keggID$Ngenes<=2 ,] # IDs with higher than 200, lower than 2
+keggID<-keggID[!(keggID$keggNames %in% HighlowN$keggNames),]  # only select genes below/equal N=100
+
+# figured that kegg_hash is not of the same length as the pathway_indices, so I need to get the ones that are in the indice list only 
+keggID<-keggID[keggID$keggNames %in% Pathway_list$.,]
+
+# loop to assign gene names to locus tag
+for (i in 1:length(keggID[,1])){
+  genes<-strsplit(keggID$locus_tag[i], ",") %>% as.data.frame() # split string
+  DE<-macrophagesDE$locus_tag[macrophagesDE$locus_tag %in% genes[,1]] 
+  DEg<-macrophagesDE$gene_name[macrophagesDE$locus_tag %in% genes[,1]] 
+  genes<-resultPl123$gene_name[match(genes[,1],resultPl123$locus_tag)] # save gene names
+  keggID$gene_names[i]<-paste(genes,collapse=',')
+  keggID$DE_locus[i]<-paste(DE,collapse=',')
+  keggID$DE_genes[i]<-paste(DEg,collapse=',')} # collapse string to save in keggID
+
+## clean up
+rm(ls_kegg)
+rm(HighlowN) # not needed anymore\
+```
+
+The filtering threshold is set much higher and lower because KEGG pathways do not follow the same hierachy as GO-terms. 
+
+## Get filtered indices list for downstream analysis
+
+As I now filtered and removed a substantial portion of the pathways I can get indices depending on the filtered pathways/terms
+
+```{r}
+pathway_indicesGOKEGG<- c(pathway_indices[names(pathway_indices) %in% Offspring_nopar],pathway_indices[names(pathway_indices) %in% keggID$keggNames])
+```
+
+## Pathway analysis with camera (edgeR, competative test)
+
+Camera is a competative test which allows to look at which pathway is most important and takes the whole genetic background into account.
+
+Use camera for competative test
+
+```{r, fig.show="asis"}
+# Use fry for pathway enrichment analysis and use the indices for both GO and KEGG
+cam_res <-camera.DGEList(dgList2, index=pathway_indicesGOKEGG, design=designMat, contrast=contrast) %>% as.data.frame() # test
+```
+
+Formatting again
+
+```{r, fig.show="asis"}
+# give results appropriate columns and names and fill in information
+GO_hasm<-GO_hash%>% as.data.frame()
+
+cam_res$path<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$Description[match( rownames(cam_res),keggID$keggNames)],GO_hasm$.[match(rownames(cam_res),rownames(GO_hasm))])
+
+cam_res$genes<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$gene_names[match( rownames(cam_res),keggID$keggNames)],Go_df$gene_names[match(rownames(cam_res),Go_df$Goterm)]) # gene ID associated with pathwa/GO term
+
+cam_res$locus_tag<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$locus_tag[match( rownames(cam_res),keggID$keggNames)],Go_df$locus_tag[match(rownames(cam_res),Go_df$Goterm)]) 
+
+#  get DE locus tags and gene names
+cam_res$DEgenes<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$DE_genes[match( rownames(cam_res),keggID$keggNames)],Go_df$DE_genes[match(rownames(cam_res),Go_df$Goterm)]) 
+cam_res$DElocus<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$DE_locus[match( rownames(cam_res),keggID$keggNames)],Go_df$DE_locus[match(rownames(cam_res),Go_df$Goterm)]) 
+```
+
+Function for making pathway names nice
+
+```{r, fig.show="asis"}
+# format dataset 
+#Function to capitalise string from https://rstudio-pubs-static.s3.amazonaws.com/408658_512da947714740b99253228f084a08a9.html
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+        sep="", collapse=" ")
+}
+```
+
+Format dataframe
+
+```{r}
+library(ggridges)
+library(ggplot2)
+# capitalise pathway
+for (i in 1:length(cam_res$path)){
+  cam_res$path[i]<-CapStr(cam_res$path[i])
+}
+
+# add gene ratio and Condition
+for (i in 1:length(cam_res[,1])){
+  cam_res$GeneRatio[i]<-sum(strsplit(cam_res$locus_tag,",")[[i]] %in% macrophagesDE$locus_tag==T)/cam_res$NGenes[i]
+}
+# other formatting stuff
+# get DE pathways
+cam_res$term<-rownames(cam_res) # assign ID
+cam_res$type<-ifelse(grepl("map*",cam_res$term)==T,"KEGG","GO") #assign pathway type
+cam_res$Direction[cam_res$Direction== "Up"]<-"Amplified"
+cam_res$Direction[cam_res$Direction== "Down"]<-"Attenuated"
+pathwayDE<-cam_res[cam_res$FDR<0.05,]
+```
+
+
+## Nice pathway plots
+Make plots of selected pathways GO-KEGG for selected pathways. Only plot selected pathways that show little or no overlap
+To do so, we first need to remove pathways with redundancies and only keep one as representative of that pathway: 
+```{r}
+## to plot GO and KEGG in one plot: 
+camera_plot<-pathwayDE[pathwayDE$path != "Lipopolysaccharide Biosynthesis"& pathwayDE$path != "Pyrimidine Ribonucleoside Biosynthetic Process"& pathwayDE$path != "Purine Metabolism" & pathwayDE$path != "Phenylalanine, Tyrosine And Tryptophan Biosynthesis" & pathwayDE$path != "Quinone Binding" &pathwayDE$path != "Lipopolysaccharide Biosynthetic Process" & pathwayDE$path !="Pyrimidine Metabolism" & pathwayDE$path !="Arginine Biosynthesis" & pathwayDE$path !="One Carbon Pool by Folate",]
+camera_plot[camera_plot=="Lipopolysaccharide Core Region Biosynthetic Process"]<-"LPS core biosynthetic process" # just some formatting
+camera_plot[camera_plot=="Plasma Membrane Respiratory Chain Complex I"]<-"Respiratory Chain Complex I"
+```
+
+Plot filtered KEGG and GO categories
+```{r}
+pdf(paste0(images,"pathways_FDR<0.05.pdf"), width = 23, height = 15)
+pGo <-ggplot(data = camera_plot, aes(x =GeneRatio , y = path, 
+                        color = FDR, size = NGenes, shape=Direction)) + 
+  geom_point(stroke = 8) +
+  scale_shape_manual(values=c(17,19))+
+  scale_colour_viridis_c(breaks=c(min(camera_plot$FDR),max(camera_plot$FDR)/2,max(camera_plot$FDR)),labels=c("0","",as.character(round(max(camera_plot$FDR),3))))+
+  theme_bw() +
+  theme(axis.title.x = element_text(color="black", size=40,face="bold"),
+        axis.text.x = element_text(size =30,color="black"),
+        axis.text.y = element_text(size = 30,color="black"),
+        axis.title.y=element_text(size=40,colour="black",face="bold"),
+        legend.text=element_text(size=30,color="black"),
+        legend.title=element_text(size=30,face="bold",color="black"),
+        legend.justification = c("left","top"))+
+  guides(shape=guide_legend(title="Gene set"),size=guide_legend(title="Gene number"))+
+  scale_y_discrete(labels = function(y) str_wrap(y, width =40))+
+  ylab("") + 
+  xlab("Gene ratio (N genes/ N Genes pathway)") 
+  print(pGo)
+  dev.off()
+```
+
+# COG group assignment
+Next to KEGG and GO categories, it is also useful to look at COG categories, as a kind of validation and more global view.
+
+## Get COG category
+
+```{r}
+#First map each gene to a COG category based on the eggnog file
+## get COG categories per gene
+COG_genes<-as.data.frame(cbind(new_eggnog$V1,new_eggnog$V9,new_eggnog$V7)) # get categories with their gene names
+colnames(COG_genes)<-c("locus_tag","gene_name","COG")  #assign colnames
+COG_genes<-unique(COG_genes) #get unique genes
+# read in file for description of COG categories
+COG_desc<-fread(paste0(data_dir,"20230309_COG_categories.csv"))
+```
+
+## Assign COG categories to genes based on eggnog and obtain summary statisitics
+
+```{r}
+# assign COG name and description 
+resultPl123$COG<- ifelse(resultPl123$gene_name %in%COG_genes$gene_name,COG_genes$COG[match(resultPl123$gene_name,COG_genes$gene_name)], COG_genes$COG[match(resultPl123$locus_tag,COG_genes$locus_tag)]) # match based on gene name
+resultPl123$description<-COG_desc$Description[match(resultPl123$COG,COG_desc$Category)]
+resultPl123$theme<-COG_desc$Theme[match(resultPl123$COG,COG_desc$Category)]
+# assign name to NA or - categories
+resultPl123$description[which(resultPl123$COG == "-"|is.na(resultPl123$COG)==T)]<-"no category"
+resultPl123$theme[which(resultPl123$COG == "-"|is.na(resultPl123$COG)==T)]<-"no theme"
+
+# get summary of categories present in my data
+resultPl123$COG<-as.factor(resultPl123$COG) # convert to factor
+sumCOG<-data.frame(count=summary(resultPl123$COG)) # get summary statistics of the different categories
+sumCOG$COG_cat<-rownames(sumCOG) # rowname to column variable
+```
+
+COG categories obtained from eggnog can be combinations so they need some manual editing 
+
+```{r}
+#get variables that are combined--> not necessary to make an extravariable but may be nice for overview
+combiCOG<-data.frame(COG_cat= sumCOG$COG_cat[which(!(sumCOG$COG_cat %in% COG_desc$Category)& sumCOG$COG_cat != "-" & sumCOG$COG_cat != "NA's")])
+
+# make a list that saves the combined terms and the associated description and themes
+#initialise
+COG_list<-list()
+COG_l<-list()
+# for loop that splits string, looks for corresponding description/themes, merges them and then save it as character vector 
+for (i in 1:length(combiCOG[,1])){ # loop through all COG categories/combinations in my data
+  cat1<-list() # list to fill in that empties again with every loop
+  cat2<-list()
+  COG_list[i]<-strsplit(combiCOG$COG_cat[i], "") # split the COG combinations --> e.g. CE --> "C","E",add to list
+  COG_cat<-COG_list[i]  # get list entry i
+  names(COG_cat) <- combiCOG$COG_cat[i] # give it the same of the COG category
+  COG_l<-append(COG_l, COG_cat) # append list with individual COG entries to
+  idx<-combiCOG$COG_cat[i] # index of COG category
+  for (ii in 1:length(COG_l[[idx]])){  # loop though COG_l list 
+    cat1<-append(cat1,resultPl123$description[match(COG_l[[idx]][[ii]],resultPl123$COG)]) # append description 
+    cat2<-append(cat2,resultPl123$theme[match(COG_l[[idx]][[ii]],resultPl123$COG)])} # append theme
+  COG_l[[idx]]<-append(COG_l[idx],c(list(paste(cat1,sep="",collapse = ";")),list(paste0(unique(cat2),sep="",collapse=";"))))  # append both theme and desc collapsed by ; to final list
+}
+# Assign combined terms to corresponding entry in my data
+for (i in 1:length(COG_l)){
+  idx<-which(names(COG_l[i])==resultPl123$COG)
+  resultPl123$description[idx]<-COG_l[[i]][[2]]  #assign description
+  resultPl123$theme[idx]<-COG_l[[i]][[3]]} #assign theme
+
+resultPl123$COG[is.na(as.character(resultPl123$COG))]<- c("-")
+```
+
+## Now plot the COG categories
+
+### Make a dataframe for the plots
+
+```{r}
+# make df for plotting
+plotCOG <- resultPl123
+
+## add information about COGs to dataframe and format
+# Add information:
+plotCOG$DE<-ifelse(plotCOG$FDR<0.05 &abs(plotCOG$logFC)>=0.3,"Fitness effect","Not significant") # based on threshold
+
+#make factors
+plotCOG$COG<-factor(plotCOG$COG) # make factors
+plotCOG$description<-factor(plotCOG$description)
+plotCOG$theme<-factor(plotCOG$theme)
+plotCOG$DE<-factor(plotCOG$DE)
+plotCOG$model<-"M-SL1344"
+```
+
+### Get the Top5 COG categories (as % with fitness effect)
+I wanted to get the most relevant categories in  my data. Therefore, I grouped all COG categories, model and fitness effect (yes,no) and get their summary statistic. Then I calculated the percentage DE per category and model (e.g. category A in model A 20% DE , 80% not DE). Thereafter, I filtered categories to get the top 5 categories DE with at least 10 counts per category& at least 5 DE genes. I set these cut-off to prevent the enrichment of categories, often combinations of COG categories, with low counts. E.g. a category ABC had 2 genes both show a fitness effect, meaning that all genes in that category have a fitness effect. This is of course an artefact due to the low number of genes. By setting a cut-off I prevent that.
+```{r}
+### make Df for plotting with % DE per category and filtering steps
+#aggregate and prepare for plotting
+COGcounts <- ddply(plotCOG, .(COG, model,description, theme,DE), nrow) # summarise plotCOG according to COG,model etc/
+names(COGcounts) <- c("COG", "model","description","theme","DE","counts") # give appropriates column names
+
+# get percentage per category and model
+COGcounts<-COGcounts %>% dplyr::group_by(model,COG) %>% dplyr::mutate(percent = (counts/sum(counts) * 100))
+
+# get the top 5 categories DE with at least 10 counts per category& at least 5 DE genes 
+df<-COGcounts %>% dplyr::group_by(COG) %>%  dplyr::mutate(sum_counts = sum(counts)) %>%  dplyr::filter(if_any(sum_counts,~.>=10))%>%  dplyr::filter(if_any(counts,~.>=5))%>%  
+dplyr::group_by(model)  %>% dplyr::arrange(desc(percent), .by_group = TRUE) %>% dplyr::arrange(DE,.by_group = TRUE) %>% dplyr::slice(1:5)#select top5 (or other file if interested)
+df$COG<-factor(df$COG)
+# make factor
+
+```
+
+### Plot categories as bargraph
+
+COG categories
+```{r}
+library('ggplot2')
+library('scales')
+library('RColorBrewer')
+library('viridis')
+library('gplots')
+library('stringr')
+## Make plot of Top5 categories in my data
+png(paste0(images, "COG_categories_percentage_macrophage_Top5.png"), width = 4000, height =4000, res=300)
+p1<-ggplot(df, aes(x = reorder(description,-percent),y = percent ,fill = reorder(description,-percent)))+ # order according to %
+  geom_bar(stat = "identity",colour="black",alpha=0.8)+ # higher hjust value  here causes horizontal adjustment to left side
+  theme(
+      axis.text=element_text(size=30,color="black"),
+      axis.title.x = element_text(color="black", size=40),
+      axis.title.y = element_text(color="black", size=40),
+      axis.ticks = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      legend.position = "none")+
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 5))+
+      scale_fill_manual(values =c("#440154FF", "#482878FF", "#3E4A89FF", "#31688EFF", "#26828EFF"))+
+      guides(fill=guide_legend(title="COG:",nrow=1,byrow=T))+
+      ylab("Genes with fitness effect per category (%)") +
+      xlab("")
+print(p1)
+dev.off()
+```
+
+# FIGURES FOR REPORT
+
+```{r}
+library(ggh4x)
+## SPI island and Purines
+resultPl123$model<-"M-SL1344"
+subset<-resultPl123[resultPl123$locus_tag %in% regulons$`SPI-2`,]
+subset$logFC<-as.numeric(subset$logFC)
+subset$Function<-ifelse(grepl("ssa",subset$gene_name), "Apparatus",
+                      ifelse((grepl("sse",subset$gene_name)==T &!(grepl("sseA|sseB|sseC|sseD",subset$gene_name)))==T|grepl("*effector*", subset$gene_function)==T,"Effectors",ifelse(grepl("sseB|sseC|sseD",subset$gene_name)==T,"Translocon","other")))
+### Plot SPI-2
+
+pdf(paste0(images,"SPI2_heatmap.pdf"), width = 40, height =6)
+SPi2<-ggplot(subset[grepl("Effector|Apparatus|Translocon",subset$Function),],aes(model,gene_name))  +
+geom_tile(aes(fill = logFC),color = "darkgrey",lwd=0.5)+
+geom_point(data=subset[which(subset$FDR <0.05&abs(subset$logFC)>=0.3),],shape=8,size=10,stroke=3)+
+theme_bw()+
+theme(axis.text.x = element_text(size=50,colour = "black", angle=90),
+strip.text.x = element_text(size = 40,face="bold"),
+axis.text.y = element_blank(),
+axis.title.y = element_blank(),
+axis.title.x = element_blank(),
+axis.ticks=  element_blank(),
+axis.line=element_blank(),
+legend.text=element_text(size=40,colour = "black"),
+legend.title=element_text(size=40,face="bold",colour = "black"),
+plot.title = element_text(size=50,face="bold", color= "black", hjust=0.5),
+panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(),
+panel.background = element_blank(),
+legend.position="right",
+legend.justification = c("left", "top"),
+legend.key.size = unit(1.5, "cm"))+
+scale_fill_gradient2("LogFC",low="navy", high="#A50026")+
+coord_flip()+
+facet_grid2(.~Function, scales = "free_x", space = "free_x", switch = "y",
+strip = strip_themed(
+background_x = elem_list_rect(
+fill = c("Structure"="white",
+"Effectors"="white"))))
+print(SPi2)
+dev.off()
+```
+
+### Supplementary: Plasmid Correction, PCA, Correlation, Density
+
+```{r}
+
+s1<-(MDA_TMM&theme(plot.margin = unit(c(1,4,0,0), "cm"))|MDA_TMM_o)&theme(axis.text=element_text(size=30,color="black"),legend.title=element_text(size=30,face="bold",color="black"),legend.text=element_text(size=30,color="black"))
+s2<-(PCA_logCPMc_o&theme(plot.margin = unit(c(2,12,2,0), "cm")))|plot_spacer()&theme(axis.text=element_text(size=30,color="black"),legend.title=element_text(size=30,face="bold",color="black"),legend.text=element_text(size=30,color="black"))
+s3<-(density + plot_spacer())&theme(plot.margin = unit(c(0,4,1,0), "cm"),legend.title=element_text(size=30,face="bold",color="black"), axis.title.x=element_text(size=40,color="black",hjust=0.5, vjust=0.9,face="bold"),legend.text=element_text(size=30,color="black"))
+
+final<-((s1)/s2/s3)&theme(axis.title = element_text(size = 40, face="bold"))
+pdf(paste0(images,"Supplementary_figure_corrections.pdf"), width = 30, height =30)
+print(final)
+
+```
+
+
+
+```{r}
+write.csv(cam_res,paste0(excel, "pathway_camera.csv"),row.names = F) # the whole pathway
+write.csv(pathwayDE,paste0(excel, "pathwayDE_camera.csv"),row.names = F) #only DE
+write.csv(macrophagesDE,paste0(excel,"differential_fitness_barquist.csv"), row.names = F) #results DE
+write.csv(resultPl123,paste0(excel,"TraDIS_DE_Pl123.csv"),row.names = F) #all results
+write.csv(COGcounts,paste0(excel,"COG_percentages.csv"),row.names = F)
+writeLines(capture.output(sessionInfo()), "sessionInfo.txt") # capture output as vector and write to file
+save(resultPl123,file=paste0(excel, "TraDIS_DE_P1P2P3Cor.R")) # save R data
+write.csv(resultPl123,paste0(excel, "TraDIS_DE_Pl123.csv"), row.names = F)
+```
+
