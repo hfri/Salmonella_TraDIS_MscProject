@@ -1,11 +1,8 @@
 # Salmonella_TraDIS_MscProject
 
-In this resporitory, I you can find the datafiles and scripts used for analysing M-SL1344, M-D23580, HeLa cells, and M-RNAseq. The files needed for the analysis and the respective scripts are added to respective folders.
-I also added a folder where I added all datasets ultimately used for later integrated analyses, including a script where I compiled them into a large dataframe.
+In this resporitory,  you can find the datafiles and scripts used for analysing M-SL1344, M-D23580, HeLa cells, and M-RNAseq. The files needed for each analysis and the scripts are added to respective folders.
+For the integrative analysis, one folder is added with all datafiles ultimately used for later integrated analyses and a script on how datafiles were formatted and compiled.
 
-## Source data
-Comming soon.. 
-- Overview of content of used data and description of what was done to it + respective script
 ### TraDIS data- this study
 - [SL1344 TraDIS data](M_SL1344)
 - Contains scripts and data for differential fitness analysis of M-SL1344
