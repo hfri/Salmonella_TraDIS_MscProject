@@ -7,16 +7,16 @@ For the integrative analysis, one folder is added with all datafiles ultimately 
 - [SL1344 TraDIS data](M_SL1344)
 - Contains scripts and data for differential fitness analysis of M-SL1344
 ### Public data
-TraDIS data
+TraDIS data:
     - M-D23580: [Canals et al. 2019](M_D23580)
-        - Contains scripts and data for differential fitness analysis of str D23580 survival in macrophages
+        - Contains scripts and data for differential fitness analysis of str D23580 survival in macrophageS
         - Re-analysis: complete fitness and pathway analysis
     - HeLa: [Wang et al. 2021](HeLa) 
         - Contains scripts and data for differential fitness analysis of strain 14280s in HeLa cells (one passage)
         - Re-analysis:fitness analysis and pathway analysis
 Expression data:
     - M-RNAseq: [Canals et al. 2019b](M-RNAseq)
-        -    Contains scripts and data for differential expression analysis of str ST74 survival in macrophages
+        - Contains scripts and data for differential expression analysis of str ST74 survival in macrophages
 ### Integrative analysis
 - folder contains a script that was used to compile and format a lot of the datasets at once
 - data folder contains input data, these are datafiles that came from different individual analyses
