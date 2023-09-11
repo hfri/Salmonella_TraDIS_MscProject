@@ -1,0 +1,436 @@
+---
+title: "20230721_RNAseq_SL1344"
+author: "Hanna Fricke"
+date: "2023-07-21"
+output: html_document
+---
+The intra macrophage experiment was conducted by Canals et al in their 2019 paper. They used the ST74 strain in three replicates in different in vitro conditions as well as intramacrophage growth. Here I used their raw count data they provide for their DE analysis in DEGUST
+
+paper:
+https://doi.org/10.1371/journal.pbio.3000059
+
+# Expression analysis of ST74 macrophage model
+## set up working directory
+
+```{r}
+# set result directory for plots etc.
+data_dir <- "/home/hanna/Documents/Macrophages_project/Final/M_RNAseq/data/"
+res_dir <- "/home/hanna/Documents/Macrophages_project/Final/M_RNAseq/output/"
+excel<-"/home/hanna/Documents/Macrophages_project/Final/M_RNAseq/output/excel/"
+images<-"/home/hanna/Documents/Macrophages_project/Final/M_RNAseq/output/images/"
+
+if(!dir.exists(res_dir)) dir.create(res_dir)
+if(!dir.exists(excel)) dir.create(excel)
+if(!dir.exists(images)) dir.create(images)
+knitr::opts_chunk$set(fig.path=res_dir, warning=F,
+                      message=F, echo=T, dev="cairo_pdf")
+
+if(!dir.exists(res_dir)) dir.create(res_dir)
+```
+
+## Load some packages
+
+```{r}
+library(matrixStats)
+library(magrittr)
+library(ggplot2)
+```
+
+## Load data and create count table
+
+```{r}
+library(data.table)
+library(SummarizedExperiment)
+## load and format files
+# macro data
+macro_all<-fread(paste0(data_dir,"Rawseq_reads_fitness_strain.csv"),data.table = F) # This file contains CDS and sRNA data from Wang et al
+ST74<-macro_all[,c(2:3,4:6,16:18)] # select ESP and macro
+rownames(ST74)<-ST74$`FEATURE`
+meta_data<-ST74[,c(1:2)] # get meta data
+colnames(meta_data)<-c("locus_tag","gene_name") # assign appropriate col names
+
+colnames(ST74)<-c("locus_tag","gene_name","ESP_1","ESP_2","ESP_3","Macro_1","Macro_2","Macro_3")
+
+counts_tab<-ST74[,-c(1:2)]%>%data.matrix() # remove gene name and locus 
+
+```
+
+
+# EdgeR -Preprocessing
+
+## Initialise edgeR variables
+
+```{r}
+library("limma")
+library('edgeR')
+## Get metadata
+sample_info<-data.frame(identifier=c("ESP_1","ESP_2","ESP_3","Macro_1","Macro_2","Macro_3"), # "input1",
+                        condition=c(rep("ESP",3),rep("Macro",3)),
+                        replicate=c("1","2","3","1", "2","3"))
+group <- factor(sample_info$condition) # condition grouping factor
+replicate <- factor(sample_info$replicate) # replicate factor
+
+dgeAll <- DGEList(counts_tab, group=group, genes=rownames(counts_tab)) # make a DGE list with group indicator=column and rows= feature
+```
+
+### PCA of raw count data
+PCA Raw counts 
+```{r}
+library('viridis')
+library('ggplot2')
+logcounts<-log2(counts_tab+1)
+fname<-"RNAseq_"
+pdf(paste0(images, "PCA_Macro_raw_log2counts.pdf"))
+pca_raw <- stats::prcomp(t(logcounts))  # :: helps you to access specific package in r (here stats:) then apply pcrcomps to transposed logcounts
+pca_df <- cbind(pca_raw$x %>% as.data.frame(),   # make a PCA df by cbind (column bind), make it a df with x=PCA components  and add a column with sample_names
+sample=rownames(pca_raw$x))
+pca_df$condition <- sample_info$condition[match(pca_df$sample, sample_info$identifier)]# assign meta data to the sample
+
+pca_imp <- summary(pca_raw)$importance[2,] # importance = variance explained
+# plot the PCA1 and PCA2
+p <- ggplot(pca_df, aes(x=PC1, y=PC2,label=replicate, col=factor(condition))) +
+  geom_point(aes(shape=replicate),size=4.5)+
+  scale_color_manual("condition", values=viridis(3)) +
+  scale_size_manual("", values=c(7,4)) +
+  scale_x_continuous(name=paste0("PC1 (", round(pca_imp[1]*100), "%)")) +
+  scale_y_continuous(name=paste0("PC2 (", round(pca_imp[2]*100), "%)")) +
+  theme_classic() +
+  theme(axis.text=element_text(size=20,color="black"),
+        axis.title=element_text(size=23,color="black",face="bold"),
+        plot.title=element_text(size=23,face="bold"),
+        legend.text=element_text(size=21),
+        legend.title=element_text(size=23,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="top",
+        legend.box="vertical",
+        legend.margin=margin())
+print(p)
+dev.off()
+print(p)
+```
+
+
+## Filter based on cpm to remove low counts
+
+```{r}
+# rule of thumb to identify the ideal threshold
+edgeR::cpm(10, mean(dgeAll$samples$lib.size)) # 3 cpm ~ 10 counts per lib
+# Remove all counts that are too low 
+keep <- rowSums(edgeR::cpm(dgeAll$counts) >= 3)>=4# filter based on input in at least two replicates
+dgeAll <- dgeAll[keep, , keep.lib.sizes=F] # keep.lib.sizes=FALSE, the lib.size for each sample will be recalculated 
+# inspect the filtering result
+dim(dgeAll$counts)  # to check how many rows were removed
+```
+
+
+## Normalise data using edgeRs TMM method
+
+```{r,echo=FALSE, fig.show='hide'}
+
+dgeAll  <- calcNormFactors(dgeAll,logratioTrim=0.35, sumTrim=0.08) # Increased logTrim due to spread of data rather than clustering of individual replicates around 0
+
+#calculate the normalised counts 
+normCounts <- edgeR::cpm(dgeAll) # divide by library size and multiply by 1mio
+logNormCounts <- log2(normCounts + 1)
+```
+
+### PCA of TMM normalised counts
+
+```{r}
+pdf(paste0(images, "PCA_Macro_norm_counts.pdf"))
+logcounts <- logNormCounts 
+pca_raw <- stats::prcomp(t(logcounts))  # :: helps you to access specific package in r (here stats:) then apply pcrcomps to transposed logcounts
+pca_df <- cbind(pca_raw$x %>% as.data.frame(),   # make a PCA df by cbind (column bind), make it a df with x=PCA components  and add a column with sample_names
+sample=rownames(pca_raw$x))
+pca_df$condition <- sample_info$condition[match(pca_df$sample, sample_info$identifier)]# assign meta data to the sample
+
+pca_imp <- summary(pca_raw)$importance[2,] # importance = variance explained
+# plot the PCA1 and PCA2
+p <- ggplot(pca_df, aes(x=PC1, y=PC2,label=replicate, col=factor(condition))) +
+  geom_point(size=4.5)+
+  scale_color_manual("condition", values=viridis(3)) +
+  scale_size_manual("", values=c(7,4)) +
+  scale_x_continuous(name=paste0("PC1 (", round(pca_imp[1]*100), "%)")) +
+  scale_y_continuous(name=paste0("PC2 (", round(pca_imp[2]*100), "%)")) +
+  theme_classic() +
+  theme(axis.text=element_text(size=20),
+        axis.title=element_text(size=23),
+        plot.title=element_text(size=23,face="bold"),
+        legend.text=element_text(size=21),
+        legend.title=element_text(size=23,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="top",
+        legend.box="vertical",
+        legend.margin=margin())
+print(p)
+dev.off()
+print(p)
+```
+
+# EdgeR- Differential fitness analysis
+
+## Set up design matrix
+```{r, echo=FALSE}
+designMat <- model.matrix(~0+group)# model without intercept
+colnames(designMat) <- colnames(designMat) %>% sub("group", "", .) # remove group from groupOUTPUT
+contrast<- makeContrasts(Macro-ESP, levels=designMat) 
+```
+
+## Estimate dispersion
+
+```{r, echo=FALSE}
+dgList <- estimateDisp(dgeAll, design=designMat) 
+plotBCV(dgList) 
+```
+
+## Fit NB model and F-test
+
+```{r}
+##Fit the model
+fit <- glmQLFit(dgList, designMat, robust=TRUE) # Fit a quasi-likelihood negative binomial glm, conduct genewise statistical tests 
+plotQLDisp(fit)
+
+## conduct an F-test based multiple comparison test
+qlf<- glmQLFTest(fit, contrast=contrast) # empirical Bayes quasi-likelihood F-tests > stricter error rate control as it accounts for uncertainty in dispersion
+```
+
+### Inspect the results and format
+
+```{r}
+# Extract the top DE genes 
+result2<- topTags(qlf, length(logNormCounts[,1])) # get all genes
+# get a df with all the results and add relevant information
+result2<-result2$table # DE results
+
+```
+
+### Make a dataframe for plotting and further inspection
+
+```{r}
+# Quick assignment, not thorough assignment of gene names and function
+my_data<-fread(paste0(data_dir,"TraDIS_DE_Pl123.csv"),data.table=F)#for spi assignment
+names(result2)[names(result2)=="genes"]<-"locus_tag"
+result2$gene_name<-meta_data$gene_name[match(result2$locus_tag, meta_data$locus_tag)] #add gene name
+result2$gene_function<-meta_data$gene_function[match(result2$locus_tag, meta_data$locus_tag)] #add function
+result2$spi<-my_data$spi[match(result2$gene_name,my_data$gene_name)]
+```
+
+### Density plot of genes with and without fitness effect
+
+```{r}
+library(ggridges)
+library(plyr)
+resultDE_1<-result2
+resultDE_1$model<-""
+resultDE_1$DE2<-ifelse(resultDE_1$FDR<0.001, "Yes", "No")
+
+pdf(paste0(images,"Density_distributions_DF_effects_MAcro-edgeronly<FDR0.001.pdf"), width = 15, height =12)
+hela_edger<-ggplot(resultDE_1, aes(x=logFC, y=model,group = interaction(DE2, model), fill = DE2)) +
+  geom_density_ridges(alpha=0.4) +
+  theme_ridges() + 
+  theme(axis.text.y=element_text(size=30,color="black"),
+        axis.title.y = element_blank(),
+        axis.text.x=element_text(size=30,color="black"),
+        axis.title.x=element_text(size=30,color="black",hjust=0.5, vjust=0.9,face="bold"),
+        plot.title=element_blank(),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification = c("left","top"),
+        legend.box="vertical",
+        legend.margin=margin(),
+        axis.line = element_line(color = "black"))+
+  guides(fill=guide_legend(title="Fitness effect:"))+
+  xlab("Log2FC (Output/Input)")+
+  scale_fill_manual("DE2",values=c("darkgrey", "#31688EFF"))+
+  geom_vline(xintercept=c(-1.25,0,1.25),linetype="dashed",linewidth=2, color = c("#31688EFF", "lightgrey","#31688EFF"))+
+    scale_x_continuous(breaks=seq(round_any(min(resultDE_1$logFC),10), round_any(max(resultDE_1$logFC),10),1)) +
+  scale_y_discrete(expand = c(0, 0))
+
+print(hela_edger)
+dev.off()
+print(hela_edger)
+
+# resultDE_1$DE2<-ifelse(resultDE_1$FDR<0.05, "Yes", "No")
+# pdf(paste0(images,"Density_distributions_DF_effects_MAcro-edgeronly<FDR0.05.pdf"), width = 20, height=18)
+# hela_edger<-ggplot(resultDE_1, aes(x=logFC, y=model,group = interaction(DE2, model), fill = DE2)) +
+#   geom_density_ridges(alpha=0.4) +
+#   theme_ridges() + 
+#   theme(axis.text.y=element_text(size=30,color="black"),
+#         axis.title.y = element_blank(),
+#         axis.text.x=element_text(size=30,color="black"),
+#         axis.title.x=element_text(size=30,color="black",hjust=0.5, vjust=0.9,face="bold"),
+#         plot.title=element_blank(),
+#         legend.text=element_text(size=30),
+#         legend.title=element_text(size=30,face="bold"),
+#         legend.spacing.x=unit(0.1, "cm"),
+#         legend.position="right",
+#         legend.justification = c("left","top"),
+#         legend.box="vertical",
+#         legend.margin=margin(),
+#         axis.line = element_line(color = "black"))+
+#   guides(fill=guide_legend(title="Fitness effect:"))+
+#   xlab("Log2FC (Output/Input)")+
+#   scale_fill_manual("DE2",values=c("darkgrey", "#31688EFF"))+
+#   geom_vline(xintercept=c(-1.25,0,1.25),linetype="dashed",linewidth=2, color = c("#31688EFF", "lightgrey","#31688EFF"))+
+#     scale_x_continuous(breaks=seq(round_any(min(resultDE_1$logFC),10), round_any(max(resultDE_1$logFC),10),1)) +
+#   scale_y_discrete(expand = c(0, 0))
+# print(hela_edger)
+# dev.off()
+# print(hela_edger)
+```
+ Higher FDR results in clearer distinction. Cut off at 1.25
+ 
+### MDA plot
+
+```{r}
+# 
+#assign fitness category
+result2$DE<-ifelse(result2$FDR< 0.001& result2$logFC<=-1.25,"Attenuated",ifelse(result2$FDR<0.001& result2$logFC >=1.25,"Amplified", "Unchanged"))
+
+## MD plot
+pl2 <- ggplot(result2) +
+    geom_point(data=result2,aes(x=logCPM,y=logFC))
+print(pl2)
+dev.off()             
+pl2 <- ggplot(result2) +
+    geom_point(data=result2[which(result2$DE == "Unchanged"),],aes(x=logCPM,y=logFC,colour='Unchanged'),shape=19,  size=5,alpha = 1/3)+
+  geom_point(data=result2[which(result2$DE == "Amplified"),],aes(x=logCPM,y=logFC,colour='Amplified'),  shape=19, size=5,alpha=0.5)+ 
+  geom_point(data=result2[which(result2$DE == "Attenuated"),],aes(x=logCPM,y=logFC,colour='Attenuated'), shape=19,size=5, alpha=0.5) +
+  geom_hline(yintercept=c(0,1,-1),linetype="dashed", color = c("black", "lightgrey","lightgrey"))+
+   geom_point(data=result2[which(result2$FDR>0.05 & result2$spi== "SPI-2"),],aes(x=logCPM,y=logFC,colour='SPI-2'),alpha = 2/3,size=5)+
+    geom_point(data=result2[which(result2$FDR<0.05 &result2$spi == "SPI-2"),],aes(x=logCPM,y=logFC,colour='SPI-2'),alpha = 1,size=4.5)+
+    geom_point(data=result2[which(result2$FDR>0.05 & result2$spi== "SPI-1"),],aes(x=logCPM,y=logFC,colour='SPI-1'),alpha = 2/3,size=5)+
+    geom_point(data=result2[which(result2$FDR<0.5& result2$spi == "SPI-1"),],aes(x=logCPM,y=logFC,colour='SPI-1'),alpha = 1,size=4.5)+
+  scale_color_manual("", values=c("Amplified"="#38598CFF", 
+                                  "Attenuated"="#440154FF",
+                                  "Unchanged"="lightgrey",
+                                  "SPI-1"= "#35B779FF", 
+                                  "SPI-2"= "#FFC725CC"),#"#35B779FF" ,"#FDE725FF"
+                     labels= ~ stringr::str_wrap(.x, width = 1)) +
+  scale_size_manual("Log2FC Fitness", values=c(7,4)) +
+  scale_x_continuous("Average expression log2(cpm)") +
+  scale_y_continuous("Log2FC (Output/Input)") +
+  theme_classic() +
+  theme(axis.text=element_text(size=30,color="black"),
+        axis.title=element_text(size=30,color="black",face="bold"),
+        legend.text=element_text(size=20),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification=c("left","top"))
+print(pl2)
+cairo_pdf(paste0(images, "TraDIS_MDA_edgeRonly_FDR<0.001&logFC1.25.pdf"), width = 12, height = 10) # have issues with paste so will jsut specify the whole pathway name
+print(pl2)
+dev.off()
+png(paste0(images, "TraDIS_MDA_macro_expr_edgeRonly_FDR<0.001&logFC1.25.png"), width = 4000, height = 4000, res=300)
+print(pl2)
+dev.off()
+
+print(pl2)
+```
+
+
+
+### Vulcano plot 
+
+```{r}
+library(ggrepel)
+plot_data<-result2
+pdf(paste0(images,"Figure_DE_vulcano_Macro_expr_edgeR_FDR<0.001&logFC1.25.pdf"), width = 25, height = 20)
+  vulcano<-ggplot(data =plot_data , aes(x = logFC, y = -log10(FDR),col = DE)) +
+    geom_point(alpha=0.5,size=3)+
+     geom_point(data=result2[which(grepl("hfq",result2$gene_name)==T|grepl("pyr",result2$gene_name)==T|grepl("arg",result2$gene_name)==T|grepl("pur",result2$gene_name)==T),],aes(x=logFC,y=-log10(FDR),colour='Pur genes'),alpha = 1,size=6.5)+
+     geom_point(data=result2[which(result2$FDR>=0.001 & result2$spi== "SPI-2"),],aes(x=logFC,y=-log10(FDR),colour='SPI-2'),alpha = 0.5,size=5)+
+    geom_point(data=result2[which(result2$FDR<0.001 &result2$spi == "SPI-2"),],aes(x=logFC,y=-log10(FDR),colour='SPI-2'),alpha = 1,size=4.5)+
+    geom_point(data=result2[which(result2$FDR>=0.001  & result2$spi== "SPI-1"),],aes(x=logFC,y=-log10(FDR),colour='SPI-1'),alpha = 0.5,size=5)+
+    geom_point(data=result2[which(result2$FDR<0.001& result2$spi == "SPI-1"),],aes(x=logFC,y=-log10(FDR),colour='SPI-1'),alpha = 1,size=4.5)+
+    theme_set(theme_classic(base_size = 20) +
+              theme(
+                axis.title.y = element_text(hjust = 0.5,face = "bold", margin = margin(0,20,0,0), size = rel(1.1), color = 'black'),
+                axis.title.x = element_text(hjust = 0.5, margin = margin(0,20,0,0), size = rel(1.1),face = "bold", color = 'black'),
+                plot.title = element_text(hjust = 1),
+                legend.title=element_text(size=20,face="bold",color="black"),
+                legend.text=element_text(size=20,face="bold",color="black"),
+                legend.position="right",
+                legend.justification = c("left", "top")))+
+                geom_vline(xintercept = c(-1.25, 1.25), col = "gray", linetype = 'dashed') +
+                geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') +
+                scale_color_manual(values = c("Attenuated"="#440154FF", 
+                                              "Amplified"="#38598CFF",
+                                              "Unchanged"="grey", 
+                                              "SPI-1"= "#35B779FF",
+                                              "SPI-2"= "#FFC725CC",
+                                              "Pur genes"= "red"),breaks=c("Attenuated", "Amplified","Unchanged", "SPI-1","SPI-2")) + # to set the colours of our variabe
+                guides(color=guide_legend(title=""))+
+        geom_text_repel(label=ifelse( grepl("pyr",plot_data$gene_name)==T|grepl("pur",plot_data$gene_name)==T|grepl("arg",result2$gene_name)==T|grepl("hfq",plot_data$gene_name)==T,plot_data$gene_name,''),box.padding = 0.3,max.overlaps = Inf,position = position_jitter(0.1, seed = 2), show.legend = FALSE,col="black",fontface = "bold", size=15)
+  print(vulcano)
+  dev.off()
+```
+
+### heatmap 
+
+```{r}
+result2DE<-result2[result2$FDR<0.001&abs(result2$logFC)>=1.25,]
+fname=paste0(images,"Macro_heatmap_edgeR_FDR<0.001&logFC1.25")
+  # Add the gene names to the data
+  # order the top values and get the 
+  logCPM <- data.frame(logNormCounts) # log transform values and take cpm , +2 to avoid undefined log2(0)
+  logCPM$FDR<-result2$FDR[match(rownames(logCPM),rownames(result2))]
+  o <- order(logCPM$FDR) # returns indices of P-values in sorted manner
+  logCPM <-logCPM[o[1:length(result2DE[,1])],] # plot top genes --> select desired range
+  logCPM<-logCPM[,c(1:length(logCPM[1,])-1)] # remove FDR ag
+  logCPM <- t(scale(t(logCPM))) # scale to mean 0 and sd 1
+  
+  # Create the heatmap annotation
+  # column annotations
+  annotation_col = data.frame(
+                      Condition = factor(c(rep(c("Input"),3),rep(c("Output"), 3))))
+  rownames(annotation_col)<-colnames(logCPM)
+  annotation_row = data.frame(Genes=rownames(logCPM))
+  #row annoations
+  
+  rownames(annotation_row)<-annotation_row$Genes
+  annotation_row$logFC<-result2$logFC[match(rownames(logCPM),rownames(result2))]
+  annotation_row<-annotation_row$logFC %>% as.data.frame(row.names = rownames(annotation_row))
+  colnames(annotation_row)="LogFC"
+  #colour annotations
+  ann_colors = list(
+    Condition = c(Input = "grey", Output = "#000004FF"),
+    LogFC=colorRampPalette(c("navy","#FFFFBF", "#A50026"))(50))
+  heatmap<-ComplexHeatmap::pheatmap(logCPM, 
+           cluster_rows = T,                       
+           cluster_cols = T, 
+           show_rownames = F, 
+           show_colnames = T,
+           treeheight_row= 0,
+           cutree_rows = 2,
+           cutree_cols = 2,
+           annotation_col = annotation_col, 
+           annotation_row = annotation_row,
+           annotation_names_row = F,
+           annotation_names_col = F,
+           name = "Log2 (cpm)",
+           annotation_colors = ann_colors,
+           col=colorRampPalette(c( "#38598CFF","#F7F7F7","#440154FF"))(50),
+           clustering_distance_rows = "euclidean")
+  print(heatmap)
+  cairo_pdf(paste0(fname,".pdf") , width = 6, height = 6) # have issues with paste so will jsut specify the whole pathway name CHANGE name for pseudo/no pseudo gene normalisation
+  print(heatmap)
+  dev.off()
+  png(paste0(fname, ".png"), width = 2000, height = 2000, res=300)
+  print(heatmap)
+  dev.off()
+  print(heatmap)
+```
+
+```{r}
+write.csv(result2,paste0(excel,"RNA_seq_ST74.csv"), row.names = F)
+result2DE<-result2[result2$FDR<0.001&abs(result2$logFC)>=1.25,]
+```
+
+```{r}
+sessionInfo()
+```
+
