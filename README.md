@@ -10,14 +10,14 @@ Comming soon..
 - [SL1344 TraDIS data](M_SL1344)
 - Contains scripts and data for differential fitness analysis of M-SL1344
 ### Public data
-TraDIS data(README.md)
-- [Public data](README.md)
+TraDIS data
     - M-D23580: [Canals et al. 2019](M_D23580)
         - Contains scripts and data for differential fitness analysis of str D23580 survival in macrophages
         - Re-analysis: complete fitness and pathway analysis
     - HeLa: [Wang et al. 2021](HeLa) 
         - Contains scripts and data for differential fitness analysis of strain 14280s in HeLa cells (one passage)
         - Re-analysis:fitness analysis and pathway analysis
+Expression data:
     - M-RNAseq: [Canals et al. 2019b](M-RNAseq)
         -    Contains scripts and data for differential expression analysis of str ST74 survival in macrophages
 ### Integrative analysis
