@@ -11,23 +11,23 @@ Comming soon..
 ### Public data
 TraDIS data(README.md)
 - [Public data](README.md)
-    - [Canals et al. 2019](M_D23580)
+    - M-D23580: [Canals et al. 2019](M_D23580)
         - Fitness data of str D23580 survival in macrophages, SPI-2 inducing media (InSPI-2) or LB. 
         - Data: read counts for macrophage model and insertion indices for in vitro conditions
         - Re-analysis: complete fitness and pathway analysis
-    - [Wang et al. 2016](HeLa) 
+    - HeLa: [Wang et al. 2021](HeLa) 
         - Fitness data of strain 14280s in HeLa cells (one passage)
         - Data: read counts,logFCs, p-values
         - Re-analysis:fitness analysis and pathway analysis
-    - [Chaudhuri et al. 2013](README.md)
+    - Balb/c: [Chaudhuri et al. 2013](README.md)
         - Fitness data of strain SL1344 in Balb/c mice; food animal data was not utilised due to concerns regarding stochastic loss in the data
         - Data: read counts,logFCs, p-values
         - Re-analysis: taken as logFC corresponding to the minimal adjusted p-val because statistics were provided per insertion site
-    - [Grant et al. 2016](README.md)
+    -Immunodeficient mice: [Grant et al. 2016](README.md)
         - Fitness data of strain SL1344 for gp91 -/- phox mice.
         - Data: read counts,logFCs, p-values
         - Re-analysis: taken as logFC corresponding to the minimal adjusted p-val because statistics were provided per insertion site
-    - [Mandal et al. 2016](README.md)
+    - In vitro: [Mandal et al. 2016](README.md)
         - Fitness data of strain 14280s grown in different in vitro conditions
         - Data: gene names with fitness effects
         - Re-analysis: None
