@@ -18,7 +18,7 @@ TraDIS data(README.md)
     - HeLa: [Wang et al. 2021](HeLa) 
         - Contains scripts and data for differential fitness analysis of strain 14280s in HeLa cells (one passage)
         - Re-analysis:fitness analysis and pathway analysis
-    - M-RNAseq [Canals et al. 2019] (M_RNAseq)
+    - M-RNAseq: [Canals et al. 2019b](M_RNAseq)
         -    Contains scripts and data for differential expression analysis of str ST74 survival in macrophages
 ### Integrative analysis
 - folder contains a script that was used to compile and format a lot of the datasets at once
