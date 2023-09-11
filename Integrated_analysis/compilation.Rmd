@@ -1,0 +1,663 @@
+---
+title: "20230612_compile_all_animal_data"
+author: "Hanna Fricke"
+date: "2023-06-12"
+output: html_document
+---
+## Background
+This document compiled the different data sets and formats them for the subsequent integrative analysis. The data comes from many different studies using different strains as well as measures for fitness (e.g. logFC vs insertion index). To ease the comparison and plotting, this script formats all datasets to similar formats and creates one large dataframe for plotting purposes.
+
+## Preparation steps
+
+# Set working and result directories
+```{r,include=FALSE}
+# set result directory for plots etc.
+# set result directory for plots etc.
+data_dir <- "/home/hanna/Documents/Macrophages_project/Final/Compilation/data/" # macrophages
+res_dir <- "/home/hanna/Documents/Macrophages_project/Final/Compilation/output/"
+excel <- "/home/hanna/Documents/Macrophages_project/Final/Compilation/output/excel/"
+images <- "/home/hanna/Documents/Macrophages_project/Final/Compilation/output/images/"
+
+if(!dir.exists(res_dir)) dir.create(res_dir)
+if(!dir.exists(excel)) dir.create(excel)
+if(!dir.exists(images)) dir.create(images)
+
+knitr::opts_chunk$set(fig.path=res_dir, warning=F,
+                      message=F, echo=F, dev="cairo_pdf")
+knitr::opts_knit$set(root.dir = "/home/hanna/Documents/Macrophages_project/Integrated_analysis/")
+```
+
+
+# Read data and files that you need as extra information
+These are all files that differ in column names and other stuff, for coherence they need to be formatted later in the analysis
+
+```{r,include = FALSE}
+library('data.table')
+## Files needed for mapping
+
+## files need for different mapping procedures
+mapping<-fread(paste0(data_dir,"SL1344toD23580_map.tsv"),header=F,data.table = F)  # from proteinortho
+eggnog<-fread(paste0(data_dir,"salmonella_egnogg_febr23.tsv"),header=T,data.table = F)
+LT2map<-fread(paste0(data_dir,"lt2_map.csv"),header=T,data.table = F)
+
+# model data
+macrophages<-fread(paste0(data_dir,"TraDIS_DE_Pl123.csv"),header=T,data.table = F)   # my macrophage data
+
+D23580<-fread(paste0(paste0(data_dir,"Canals_DEfitness_plasmidcorrected.csv")),header=T,data.table = F)  # african strain - re-analy Canals 2019
+LB<-fread(paste0(data_dir,"Canalsetal2016_LB-1pas.csv"),header=T,data.table = F) # data from directly LB growth- Canals 2019
+
+InSPI2<-fread(paste0(data_dir,"Canalsetal2016_InSPI-3pas.csv"),header=T,data.table = F)  # data directly from InSPI2 growth- Canals 2019
+
+phox<-fread(paste0(data_dir,"Grantetal_gp91-phox_mice_aggregated_pvals.csv"),header=T,data.table = F)#gp91-phox_mice - Grant et al. 2016
+
+mouse<-fread(paste0(data_dir,"mice_Chaudhuri_aggr_FDR.csv"),header=T,data.table = F) #Balb/C mice- Chaudhuri et al. 2013
+
+hela<-fread(paste0(data_dir,"Hela_zinbwave_fitness.csv"),data.table=F)
+#pathways - focus on competative test
+
+pathwayDE<-fread(paste0(data_dir,"pathwayDE_camera.csv"),header=T,data.table = F)# camera analysis
+string_mlc<-fread(paste0(data_dir,"macro_tradis_newdata_MCL_clusters.tsv"),header=T,data.table = F) # STRING 
+regulons<-fread(paste0(data_dir,"Salmonella_regulons.csv"),header=T,data.table = F)# regulons
+
+
+### EXPRESSIOn data
+macro_RNAseq<-fread(paste0(data_dir,"RNA_seq_ST74.csv"),data.table = F)
+hela_RNAseq<-fread(paste0(data_dir,"hela_RNAseq_8h.csv"),data.table = F)
+```
+explanation for removal: There are some double values with exactly the same stats, so I decided to remove them as the statistics didnt indicate which ones would be the better match
+
+# Format data for analysis- initial formatting
+
+Many of the files have mixed naming of genes or locus tag, so I need to make that coherent. All names used for further analysis should be based on SL1344 gene names which are based on SL1344 tags (e.g. african strain first mapped to SL1344 tags, then the mapped tags are assigned a gene_name). Only genes present in my TraDIS dataset are used for comparison.
+
+```{r,include = FALSE}
+library(dplyr)
+## Load and add extra information, format file  
+## mapping based on SL1344 or LT2 genome
+# # SL1344
+names(mapping)[names(mapping)=="V1"]<-"D23580_tag"  # change name
+names(mapping)[names(mapping)=="V2"]<-"SL1344_tag"  # change name
+duplicates<-mapping[duplicated(mapping$D23580_tag),] # identify duplicates
+mapping<-mapping[!(mapping$D23580_tag %in%duplicates$D23580_tag),] # remove duplicates
+mapping<-mapping %>% distinct(D23580_tag, .keep_all = TRUE)# remove duplicates
+mapping<-mapping %>% distinct(SL1344_tag, .keep_all = TRUE)# remove duplicates
+
+## In the following a lot of formatting is done. Some is needed for data compilation to have the same column names, some, such as the assignment of model is needed for later processing.
+
+# macrophages
+macrophages$model<-"Macrophage-SL1344"
+macrophages<-macrophages[,c(1:3,6,5,12:15,4,7:11)] # reorder columns
+names(macrophages)[names(macrophages)=="spi"]<-"SPI"
+macrophages$zscore<-scale(macrophages$logFC,center = FALSE, scale = sd(macrophages$logFC))
+
+## Canals et al file from in vitro growth/macrophage conditions
+# LB condition
+names(LB)[names(LB)=="gene_name"]<-"D23580_geneID" # needed to not confuse SL1344 name with D23580 name
+names(LB)[names(LB)=="function"]<-"gene_function"
+LB$SL1344_tag<-ifelse(LB$locus_tag %in% mapping$D23580_tag,mapping$SL1344_tag[match(LB$locus_tag,mapping$D23580_tag)],
+                      ifelse(LB$D23580_geneID %in% macrophages$gene_name,macrophages$locus_tag[match(LB$D23580_geneID,macrophages$gene_name)],
+                             LB$locus_tag))# assign SL1344 tag
+
+LB<-LB[grepl("STMMW*",LB$locus_tag),] # keep chromosomal genes only
+
+LB<-LB[LB$SL1344_tag %in% macrophages$locus_tag,] # only get genes also present in my data
+LB$gene_name<-macrophages$gene_name[match(LB$SL1344_tag,macrophages$locus_tag,)] # assign SL1344 gene name 
+LB$model<-"LB"
+LB<-LB[,c(1:2,12:13,10,14,11,3:5,8:9,6,7)] #nicer format
+
+#InSPI-2 condition 
+names(InSPI2)[names(InSPI2)=="gene_name"]<-"D23580_geneID" #same as above
+names(InSPI2)[names(InSPI2)=="function"]<-"gene_function" #same as above
+InSPI2$SL1344_tag<-ifelse(InSPI2$locus_tag %in% mapping$D23580_tag,mapping$SL1344_tag[match(InSPI2$locus_tag,mapping$D23580_tag)],
+                          ifelse(InSPI2$D23580_geneID %in% macrophages$gene_name,macrophages$locus_tag[match(InSPI2$D23580_geneID,macrophages$gene_name)],
+                                 InSPI2$locus_tag))# assign SL1344 tag
+InSPI2<-InSPI2[grepl("STMMW*",InSPI2$locus_tag),] # keep chromosomal genes
+InSPI2<-InSPI2[InSPI2$SL1344_tag %in% macrophages$locus_tag,] # only keep genes also present in my dataset
+InSPI2$gene_name<-macrophages$gene_name[match(InSPI2$SL1344_tag,macrophages$locus_tag,)] # assign SL1344 gene name 
+InSPI2$model<-"InSPI2"
+InSPI2<-InSPI2[,c(1:2,12:13,10,14,11,3:5,8:9,6,7)]#nicer format
+
+# african macrophage data 
+names(D23580)[names(D23580)=="gene_name"]<-"D23580_geneID" #rename for downstream process
+D23580$SL1344_tag<-ifelse(D23580$locus_tag %in% mapping$D23580_tag,mapping$SL1344_tag[match(D23580$locus_tag,mapping$D23580_tag)],
+                          ifelse(D23580$D23580_geneID %in% macrophages$gene_name,macrophages$locus_tag[match(D23580$D23580_geneID,macrophages$gene_name)],D23580$locus_tag )) # mapping to SL1344 
+
+D23580<-D23580[D23580$DNA_molecule=="Chromosome",] # keep chromosomal genes
+D23580<-D23580[D23580$SL1344_tag %in% macrophages$locus_tag,] # only keep genes also present in my datas
+D23580$gene_name<-macrophages$gene_name[match(D23580$SL1344_tag,macrophages$locus_tag,)] # assign SL1344 gene name for later visualisation + comparison
+D23580$model<-"Macrophage-D23580"
+D23580<-D23580[,c(1,7,14,15,8:9,11:13,16,10,2:6)] 
+D23580$zscore<-scale(D23580$logFC,center = FALSE , scale = sd(D23580$logFC))#calczscore
+
+## Animal data ##
+# gp91-phox_mice 
+phox<-phox[phox$locus_tag %in% macrophages$locus_tag,] # get orthologes present in my data
+names(phox)[names(phox)=="Molecule"]<-"DNA_molecule"
+names(phox)[names(phox)=="gene_func"]<-"gene_function"
+phox<-phox[,c(2:4,1,5:7,8:11)]
+
+
+# divide the dataframe into two groups
+phox_liver<-phox[,c(1:9)] #  need to split data into 2 organs for downstream processing
+phox_liver$model<-"Phox-liver" 
+names(phox_liver)[names(phox_liver)=="FDR_liver"]<-"FDR" 
+names(phox_liver)[names(phox_liver)=="logFC_liver"]<-"logFC"
+phox_liver<-phox_liver[,c(1:7,10,8:9)] #  need to split data into 2 organs for downstream processing
+phox_liver$zscore<-scale(phox_liver$logFC,center = FALSE , scale = sd(phox_liver$logFC))
+
+phox_spleen<-phox[,c(1:7,10:11)] 
+phox_spleen$model<-"Phox-spleen"
+phox_spleen<-phox_spleen[,c(1:7,10,8:9)]
+names(phox_spleen)[names(phox_spleen)=="FDR_spleen"]<-"FDR"
+names(phox_spleen)[names(phox_spleen)=="logFC_spleen"]<-"logFC"
+phox_spleen$zscore<-scale(phox_spleen$logFC,center = FALSE, scale = sd(phox_spleen$logFC))
+
+# Balb/C mice
+mouse<-mouse[mouse$locus_tag %in% macrophages$locus_tag,]# get orthologes present in my data
+mouse$model<-"Balb/c"
+mouse<-mouse[,c(1,5,6,2,7:10,3:4)]
+names(mouse)[names(mouse)=="genefunc"]<-"gene_function"
+names(mouse)[names(mouse)=="Molecule"]<-"DNA_molecule"
+mouse$zscore<-scale(mouse$logFC,center = FALSE, scale = sd(mouse$logFC))
+
+## HeLa
+names(hela)[names(hela)=="V1"]<-"locus_tag"
+names(hela)[names(hela)=="spi"]<-"SPI"
+hela$model<-"HeLa"
+names(hela)[names(hela)=="padjFilter"]<-"FDR"
+names(hela)[names(hela)=="gene_name"]<-"s1480geneID"
+hela<-hela[hela$SL1344_tag %in% macrophages$locus_tag|hela$locus_tag %in% macrophages$gene_name,] # match to only include genes that were found in both datasets
+
+hela$gene_name<- macrophages$gene_name[match(hela$SL1344_tag,macrophages$locus_tag)] # get SL1344 gene name
+hela$zscore<-scale(hela$logFC,center = FALSE, scale = sd(hela$logFC))
+hela<-hela[,c("locus_tag","old_locus","SL1344_tag","s1480geneID","gene_name","gene_function","type","SPI","model","DE", "logFC", "logCPM","LR","PValue","FDR", "zscore")] # better column order
+
+## Expression data
+# HeLa
+names(hela_RNAseq)[names(hela_RNAseq)=="genes"]<- "locus_tag"
+names(hela_RNAseq)[names(hela_RNAseq)=="log2FC"]<- "logFC"
+hela_RNAseq$gene_name<-ifelse(hela_RNAseq$locus_tag %in% macrophages$locus_tag,macrophages$gene_name[match(hela_RNAseq$locus_tag,macrophages$locus_tag)],hela_RNAseq$locus_tag) # get gene names --> lots of sORFs
+hela_RNAseq<-hela_RNAseq[hela_RNAseq$locus_tag %in% macrophages$locus_tag,] # only keep the ones present in both datasets
+hela_RNAseq$zscore<-scale(hela_RNAseq$logFC,center = FALSE,scale = sd(hela_RNAseq$logFC))#zscore
+hela_RNAseq$model<-"HeLa-RNAseq" # assign model
+
+#Macro
+macro_RNAseq<-macro_RNAseq[macro_RNAseq$locus_tag %in% macrophages$locus_tag,] # only keep the ones present in both, removes many sORFS
+macro_RNAseq$zscore<-scale(macro_RNAseq$logFC,center = FALSE,scale = sd(macro_RNAseq$logFC))# datasets
+macro_RNAseq$model<-"Macrophage-RNAseq"
+
+## gene information, cluster data ##
+# STRING
+colnames(string_mlc)<-c("method","cluster#","cluster_colour","gene_count","gene_name","STM_id","protein_descr","cluster_name") # formatting
+
+# Regulon information
+regulons<-regulons[,which(!grepl("^[V][0-9]|[V][0-9][0-9]$", colnames(regulons)))] # select only variables with Vand 1-2 numbers 
+regulons1<-regulons[,1:14] # is based on gene_name+ STM locus tag 
+regulons2<-regulons[,15:32] # is based on locus_tag
+```
+
+### Because the regulon files are so weirdly formatted I need to get them all to locus tags
+```{r,include = FALSE}
+# Regulon1 needs work: map gene names and STM tags to SL1344 genome using an LT2 map or entries in my dataframe
+# LT2 mapping to SL1344 
+duplicatesLT2<-LT2map[duplicated(LT2map$LT2),] # identify duplicates 
+LT2map<-LT2map[!(LT2map$LT2 %in%duplicatesLT2$LT2),] # remove duplicates 
+LT2map<-LT2map %>% distinct(LT2_tag, .keep_all = TRUE)# remove duplicates
+LT2map<-LT2map %>% distinct(SL1344_tag, .keep_all = TRUE)# remove duplicates
+#map based on my data set
+library('stringr')
+for (i in 1:length(macrophages[,1])){
+  for (ii in 1:length(regulons1[1,])){
+    if (tolower(macrophages$gene_name[i]) %in% tolower(regulons1[,ii])){
+      regulons1[,ii]<-tolower(regulons1[,ii]) #convert to lower
+      regulons1[,ii]<-regulons1[,ii] %>% str_replace(tolower(macrophages$gene_name[i]), macrophages$locus_tag[i])# match gene names with names in macrophage file
+    }
+  }
+}
+
+#Improve mapping based on LT2 mapping for STM tags in regulon file
+for (i in 1:length(LT2map[,1])){
+  for (ii in 1:length(regulons1[1,])){
+    if (tolower(LT2map$LT2_tag[i]) %in% tolower(regulons1[,ii])){
+      regulons1[,ii]<-tolower(regulons1[,ii]) #convert to lower
+      regulons1[,ii]<-regulons1[,ii] %>% str_replace(tolower(LT2map$LT2_tag[i]), LT2map$SL1344_tag[i]) # match names with names in LT mapping file from protein ortho
+    }
+  }
+}
+
+# improve map[ing] based on eggnog file
+names(eggnog)[names(eggnog)=="#query"]<-"locus_tag" #better name
+for (i in 1:length(eggnog[,1])){
+  for (ii in 1:length(regulons1[1,])){
+    if (tolower(eggnog$Preferred_name[i]) %in% tolower(regulons1[,ii])){
+      regulons1[,ii]<-tolower(regulons1[,ii])
+      regulons1[,ii]<-regulons1[,ii] %>% str_replace(tolower(eggnog$Preferred_name[i]), eggnog$locus_tag[i])}#same principle, replace gene name in column with locus tag
+    }
+}# get locus tag for names that were not present in my file
+
+# make df for downstream purposes
+regulons1<-apply(regulons1,2,function(x) gsub("sl1344","SL1344",x)) # get proper format
+regulons1<-apply(regulons1,2,function(x) gsub("stm","STM",x)) # get proper format
+regulons1<-apply(regulons1,2,function(x) gsub("ncrna","ncRNA",x)) %>% as.data.frame()
+regulons<-cbind(regulons1,regulons2)
+```
+
+### I want to include more regulators later --> so make another regulon file
+
+Mainly focusses on TC and stuff in my results (SL1344-m)
+
+```{r}
+library(stringr)
+t<-fread(paste0(data_dir,"Salmonella_typhimurium_SL1344_RN.csv"), data.table=F) #regulators from Salmonella regulon database
+TC<-fread(paste0(data_dir,'Two_component_sytems.csv'), header=T, data.table = F) #TCS
+t2<-data.frame(regulators=unique(t$Node_1_old_locus_tag))
+regulators1<-macrophages[macrophages$locus_tag %in% t2$regulators,]
+regulators2<-macrophages[grepl("regulat*|sigma|repressor|activator|sensor",macrophages$gene_function)&macrophages$FDR<0.05,]
+regulators1<-regulators1[!(regulators1$locus_tag %in% regulators2$locus_tag) & regulators1$FDR<0.05,] # prevent double entries
+regulators<-rbind(regulators1,regulators2)
+regulators$type<-ifelse(tolower(regulators$gene_name) %in% tolower(TC$SK) |tolower(regulators$gene_name) %in% tolower(TC$RR),"TCS","Other regulator")
+```
+
+### More formatting
+
+```{r}
+# Format relevant datasets
+names(D23580)[names(D23580)=="locus_tag"]<-"D23580_tag"
+names(D23580)[names(D23580)=="SL1344_tag"]<-"locus_tag" # needed to merge dataframes later
+
+names(LB)[names(LB)=="locus_tag"]<-"D23580_tag"
+names(LB)[names(LB)=="SL1344_tag"]<-"locus_tag" # needed to merge dataframes later
+
+names(InSPI2)[names(InSPI2)=="locus_tag"]<-"D23580_tag"
+names(InSPI2)[names(InSPI2)=="SL1344_tag"]<-"locus_tag" # needed to merge dataframes later
+
+names(hela)[names(hela)=="locus_tag"]<-"s1480_tag"
+names(hela)[names(hela)=="SL1344_tag"]<-"locus_tag" # needed to merge dataframes later
+```
+
+
+Write out files so you dont need to do it again
+```{r,include = FALSE}
+write.csv(regulators,paste0(excel,"regulators.csv"),row.names=F)
+write.csv(regulons,paste0(data_dir,"regulons_w_locus_tag.csv"),row.names = F)
+write.csv(mapping,paste0(data_dir,"mapping_formatted.csv"),row.names = F)
+write.csv(LT2map,paste0(data_dir,"LT2map_formatted.csv"))
+write.csv(macrophages,paste0(data_dir,"macrophages_formatted.csv"),row.names = F)
+write.csv(mouse,paste0(data_dir,"mouse_formatted.csv"),row.names = F)
+write.csv(D23580,paste0(data_dir,"D23580_formatted.csv"),row.names = F)
+## Format in vitro conditions to make your life easier next time
+
+
+write.csv(phox_spleen,paste0(data_dir,"phox_spleen_formatted.csv"),row.names = F)
+write.csv(phox_liver,paste0(data_dir,"phox_liver_formatted.csv"),row.names = F)
+write.csv(hela_RNAseq,paste0(data_dir,"hela_RNAseq_formatted.csv"),row.names = F)
+write.csv(hela,paste0(data_dir,"hela_formatted.csv"),row.names = F)
+write.csv(macro_RNAseq,paste0(data_dir,"macro_RNAseq_formatted.csv"),row.names = F)
+write.csv(string_mlc,paste0(data_dir,"string_mlc_formatted.csv"),row.names = F)
+write.csv(eggnog,paste0(data_dir,"eggnog_formatted.csv"),row.names = F)
+
+
+model_list<-list(macrophages=macrophages,mouse=mouse,D23580=D23580,hela=hela,helaRNA=hela_RNAseq,macrophage_RNAseq=macro_RNAseq,LB=LB,InSPI2=InSPI2,phox_spleen=phox_spleen,phox_liver=phox_liver)#
+#,pig=pig,cattle=cattle,chicken=chicken -->excluded
+```
+
+Look at the distribution of logFCs and the median values
+There is a slight right skew of all logFCs
+```{r, include=FALSE}
+hist(mouse$logFC, breaks=100)
+hist(phox_spleen$logFC, breaks=100)
+hist(macrophages$logFC, breaks=100)
+hist(D23580$logFC, breaks=100)
+hist(hela$logFC)
+hist(hela_RNAseq$logFC)
+
+library(ggplot2)
+library(ggridges)
+library(plyr)
+l<-model_list[c("mouse","phox_spleen","phox_liver","macrophage_RNAseq","helaRNA","D23580")]
+```
+Strong differences in  magnitude and variance visible. Median logFC tends towards 0 the more controlled experimental conditions are
+
+Now make compiled dataframes from all animals 
+Dataframes have different formats, so I just decided to feed them individually to the code below but I guess that could be improved
+```{r}
+library(moments)
+# mean values of datasets
+# mean(cattle$logFC)
+# mean(chicken$logFC)
+# mean(pig$logFC)
+mean(mouse$logFC)
+mean(phox$logFC_liver)
+mean(phox$logFC_spleen)
+mean(macrophages$logFC)
+mean(D23580$logFC)
+median(hela_RNAseq$logFC) 
+```
+
+
+```{r}
+# order:LB,INSPI2,macro-D23580,macro-SL1344,Balb/c,phox_liver,phox_spleen, cattle, pig, chicken
+## For downstream processing so that the column names are the same:
+
+for (i in 1:length(model_list)){
+  model<-model_list[i] %>% as.data.frame()
+  colnames(model)<-gsub(paste0(names(model_list[i]),"."), "", colnames(model))
+  # if (startsWith(names(model_list[i]),"D23580")){# for Canals in vitro data 
+  #   names(model)[names(model)=="locus_tag"]<-"D23580_locus"
+  #   names(model)[names(model)=="SL1344_tag"]<-"locus_tag"
+  #   }
+  if (startsWith(names(model_list[i]),"InSPI2") | startsWith(names(model_list[i]),"LB")){# for Canals in vitro data
+    names(model)[names(model)=="ins_index"]<-"logFC" # for in vitro condition they are not! logFCs but insertion indices
+  }
+  #   names(model)[names(model)=="locus_tag"]<-"D23580_locus"
+  #   names(model)[names(model)=="SL1344_tag"]<-"locus_tag"
+  #   }
+  # else if (names(model_list[i])=="hela"){
+  #   names(model)[names(model)=="locus_tag"]<-"s1480_locus"
+  #   names(model)[names(model)=="SL1344_tag"]<-"locus_tag"
+  #   }
+  else{
+    model<-model
+    }
+  
+# EXPAND THIS Dataframe with the aggregated values from the experiments 
+  datalist=list()
+  for (ii in 1:length(pathwayDE$path)){
+    t1<-model$logFC[match(tolower(strsplit(pathwayDE$genes,",")[[ii]]), tolower(model$gene_name))] %>% as.data.frame()
+    colnames(t1)<-c("logFC")
+    t1$gene_name<-model$gene_name[match(tolower(strsplit(pathwayDE$genes,",")[[ii]]), tolower(model$gene_name))] # get name that is in model df
+    str<-strsplit(pathwayDE$genes,",")[[ii]]  %>% as.data.frame() # prepare for following step,split based on locus
+    t1$gene_name[is.na(t1$gene_name)]<-str$.[!(tolower(strsplit(pathwayDE$genes,",")[[ii]]) %in% tolower(model$gene_name))] # get gene names that are not in my model 
+    t1$FDR<-model$FDR[match(tolower(strsplit(pathwayDE$genes,",")[[ii]]), tolower(model$gene_name))]
+    t1$path<-pathwayDE$path[ii]
+    t1$cat<-c("GO&KEGG")
+    t1<-t1[!(t1$gene_name==''),]
+    datalist[[ii]]<-t1}
+  
+  datalist2=list()
+  # include regulons based on locus tag
+  for (j in 1:length(regulons)){ 
+    t3<-model$logFC[match(regulons[,j], model$locus_tag)] %>% as.data.frame() #no need for tolower() as I corrected above
+    colnames(t3)<-c("logFC")
+    t3$gene_name<-model$locus_tag[match(regulons[,j], model$locus_tag)] # get genes that are in model
+    t3$gene_name[is.na(t3$gene_name)]<-regulons[,j][!(regulons[,j] %in% t3$gene_name)] # if not in model, get gene name from regulon file
+    t3$gene_name<-ifelse(t3$gene_name %in% model$locus_tag,model$gene_name[match(regulons[,j], model$locus_tag)],t3$gene_name) # get gene names if available from model, if not, take name from regulon file
+    t3$FDR<-model$FDR[match(regulons[,j], model$locus_tag)]
+    t3$path<-colnames(regulons[j])
+    t3$cat<-c("regulons")
+    t3<-t3[!(t3$gene_name==''),]
+    datalist2[[j]]<-t3
+  }
+
+  string_mlc<-string_mlc[string_mlc$gene_count>=2,] # low threshold so that I can filter later
+  # for (jj in 1:length(string_mlc[,1])){
+  t4<-model$logFC[match(string_mlc$gene_name, model$gene_name)] %>% as.data.frame(names("logFC")) #no need for tolower() as I corrected above
+  colnames(t4)<-c("logFC")
+  t4$gene_name<-model$gene_name[match(string_mlc$gene_name, model$gene_name)] # get genes that are in model
+  missing<-string_mlc$gene_name[!(string_mlc$gene_name %in% t4$gene_name)]
+  if (length(missing)>0){
+    df<-data.frame(logFC=c(rep(NA,length(missing))),gene_name= string_mlc$gene_name[!(string_mlc$gene_name %in% t4$gene_name)],stringsAsFactors = FALSE)
+    t4<-rbind(t4,df)} # if not in model, get gene name from string file}
+  t4$FDR<-model$FDR[match(t4$gene_name, model$gene_name)]
+  t4$path<-string_mlc$cluster_name[match(t4$gene_name,string_mlc$gene_name)]
+  t4$cat<-c("string")
+  t4<-t4[!(is.na(t4$gene_name)),]
+  
+  t5<-model$logFC[match(regulators$gene_name, model$gene_name)] %>% as.data.frame(names("logFC"))
+  names(t5)[names(t5)=="."]<-"logFC"
+  t5$gene_name<-model$gene_name[match(regulators$gene_name, model$gene_name)]
+  missing<-t5$gene_name[!(regulators$gene_name %in% t5$gene_name)]
+  if (length(missing)>0){
+    df2<-data.frame(logFC=c(rep(NA,length(missing))),gene_name= regulators$gene_name[!(regulators$gene_name %in% t5$gene_name)],stringsAsFactors = FALSE)
+    t5<-rbind(t5,df2)} # if not in model, get gene name from regulon file}
+  t5$FDR<-model$FDR[match(t5$gene_name, model$gene_name)]
+  t5$path<-regulators$type[match(t5$gene_name,regulators$gene_name)]
+  t5$cat<-c("Regulators")
+  t5<-t5[!(is.na(t5$gene_name)),]
+  
+  #concatenate dataframe
+  pathways =do.call(rbind, datalist)  %>% as.data.frame()
+  regul =do.call(rbind, datalist2)  %>% as.data.frame()
+  string_mlc2 =t4
+ regulators1=t5
+
+  # FDR needs to be removed for InSPI2
+  if(names(model_list[i]) =="InSPI2"| names(model_list[i])=="LB"){
+    string<-string_mlc2[,c("logFC","gene_name","path","cat")]
+    }else {
+    string<-string_mlc2[,c("logFC","gene_name","FDR","path","cat")]
+    }
+  
+  # bind all relevant datasets together 
+   big_data = rbind(pathways,regul,string,regulators1)
+   big_data$path<-factor(big_data$path)
+  
+  # assign DE based on model type
+  if(names(model_list[i]) =="InSPI2"| names(model_list[i])=="LB"){
+    big_data$FDR<-big_data$logFC
+    big_data$logFC<-""
+    big_data$DE<-ifelse(big_data$FDR <0.05,"Attenuated","Insertion index >0.05")
+    big_data$DE<-factor(big_data$DE)
+    }
+    else if(names(model_list[i]) =="hela"){
+      big_data$DE<-ifelse(big_data$FDR<0.1&big_data$logFC<=-1.25,"Attenuated", #cut-off based on density distr.
+                        ifelse(big_data$FDR<0.1& big_data$logFC>=1.25, "Amplified",
+                               "FDR>=0.1"))
+      hela$DE_rec<-ifelse(hela$FDR<0.1&hela$logFC<=-1.25,"Attenuated",
+                      ifelse(hela$FDR<0.1& hela$logFC>=1.25, "Amplified",
+                             "FDR>=0.1"))
+    }
+    else if(names(model_list[i]) =="helaRNA"){
+      big_data$DE<-ifelse(big_data$FDR<0.05&big_data$logFC<=-0.5,"Attenuated", #cut-off based on density distr.
+                        ifelse(big_data$FDR<0.05& big_data$logFC>=0.5, "Amplified",
+                               "FDR>=0.05"))
+      hela_RNAseq$DE_rec<-ifelse(hela_RNAseq$FDR<0.05&hela_RNAseq$logFC<=-0.5,"Attenuated",
+                      ifelse(hela_RNAseq$FDR<0.05& hela_RNAseq$logFC>=0.5, "Amplified",
+                             "FDR>=0.05"))
+    }
+   else if(names(model_list[i]) =="macrophages"|names(model_list[i]) =="D23580"){
+     big_data$DE<-ifelse(big_data$FDR<0.05&big_data$logFC<=-0.3,"Attenuated",
+                      ifelse(big_data$FDR<0.05& big_data$logFC>=0.3, "Amplified",
+                             "FDR>=0.05"))
+    macrophages$DE_rec<-ifelse(macrophages$FDR<0.05&macrophages$logFC<=-0.3,"Attenuated",
+                      ifelse(macrophages$FDR<0.05& macrophages$logFC>=0.3, "Amplified",
+                             "FDR>=0.05"))
+    D23580$DE_rec<-ifelse(D23580$FDR<0.05&D23580$logFC<=-0.3,"Attenuated",
+                      ifelse(D23580$FDR<0.05& D23580$logFC>=0.3, "Amplified",
+                             "FDR>=0.05"))
+   }
+   else if(names(model_list[i]) =="macrophage_RNAseq"){
+    big_data$DE<-ifelse(big_data$FDR<0.001&big_data$logFC<=-1.25,"Attenuated",ifelse(big_data$FDR<0.001& big_data$logFC>=1.25, "Amplified","FDR>=0.001"))
+    macro_RNAseq$DE_rec<-ifelse(macro_RNAseq$FDR<0.001&macro_RNAseq$logFC<=-1.25,"Attenuated",ifelse(macro_RNAseq$FDR<0.001& macro_RNAseq$logFC>=1.25, "Amplified","FDR>=0.001"))
+   }
+    else {
+    big_data$DE<-ifelse(big_data$FDR<0.05&big_data$logFC<=-1.25,"Attenuated",
+                      ifelse(big_data$FDR<0.05& big_data$logFC>=1.25, "Amplified",
+                             "FDR>=0.05"))
+    mouse$DE<-ifelse(mouse$FDR<0.05&mouse$logFC<=-1.25,"Attenuated",
+                      ifelse(mouse$FDR<0.05& mouse$logFC>=1.25, "Amplified",
+                             "FDR>=0.05"))
+    phox_liver$DE_rec<-ifelse(phox_liver$FDR<0.05&phox_liver$logFC<=-1.25,"Attenuated",
+                      ifelse(phox_liver$FDR<0.05& phox_liver$logFC>=1.25, "Amplified",
+                             "FDR>=0.05"))
+    phox_spleen$DE_rec<-ifelse(phox_spleen$FDR<0.05&phox_spleen$logFC<=-1.25,"Attenuated",
+                      ifelse(phox_spleen$FDR<0.05& phox_spleen$logFC>=1.25, "Amplified",
+                             "FDR>=0.05"))
+    
+    big_data$DE<-factor(big_data$DE)
+  }
+  #make compiled dataframes
+  if(names(model_list[i]) =="LB"){
+    compiled_LB<-big_data
+    compiled_LB$model<-"LB"
+  }else if (names(model_list[i]) =="InSPI2"){
+    compiled_InSPI2<-big_data
+    compiled_InSPI2$model<-"InSPI2"
+  }else if (names(model_list[i])=="D23580"){
+    compiled_Canals<-big_data
+    compiled_Canals$model<-"Macrophage-D23580"
+  }else if (names(model_list[i])=="helaRNA"){
+    compiled_helaRNA<-big_data
+    compiled_helaRNA$model<-"HeLa-RNAseq"
+  }else if (names(model_list[i])=="macrophage_RNAseq"){
+    compiled_macroRNA<-big_data
+    compiled_macroRNA$model<-"Macrophage-RNAseq"
+  }else if (names(model_list[i])=="macrophages"){
+    compiled_macrophages<-big_data
+    compiled_macrophages$model<-"Macrophage-SL1344"
+  }else if (names(model_list[i])=="hela"){
+    compiled_hela<-big_data
+    compiled_hela$model<-"HeLa"
+  }else if (names(model_list[i])=="mouse"){
+    compiled_balbc<-big_data
+    compiled_balbc$model<-"Balb/c"
+  }else if (names(model_list[i])=="phox_liver"){
+    compiled_liver<-big_data
+    compiled_liver$model<-"Phox-liver"
+  }else if (names(model_list[i])=="phox_spleen"){
+    compiled_spleen<-big_data
+    compiled_spleen$model<-"Phox-spleen"
+  }
+}
+```
+
+
+```{r}
+## make separate datasets for model type just in case
+# animals and cells
+plot_data_systemic<-rbind(compiled_macrophages,compiled_macroRNA,compiled_Canals,compiled_balbc,compiled_liver, compiled_spleen)
+plot_data_digestive<-rbind(compiled_hela,compiled_helaRNA)# compiled_pig,compiled_cattle,compiled_chicken
+plot_data<-rbind(plot_data_systemic,plot_data_digestive)
+
+# in vitro
+plot_in_vitro<-rbind(compiled_InSPI2,compiled_LB)
+plot_in_vitro<-plot_in_vitro[,c(1:2,5,3:4,6:7)]
+
+# all--> final
+plot_data<-rbind(plot_data,plot_in_vitro) # full data set
+plot_data$path<-as.character(plot_data$path)
+names(plot_data)[names(plot_data)=="FDR"]<"Stat_threshold"
+#save
+write.csv(plot_in_vitro,paste0(excel,"1_compiled_data_in_vitro.csv"),row.names = F)
+write.csv(plot_data_digestive,paste0(excel,"2_compiled_data_digestive.csv"),row.names = F)
+write.csv(plot_data_systemic,paste0(excel,"3_compiled_data_systemic.csv"),row.names = F)
+
+```
+
+Format final plot data
+Function for formatting
+```{r}
+#To capitalise string from https://rstudio-pubs-static.s3.amazonaws.com/408658_512da947714740b99253228f084a08a9.html
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+      sep="", collapse=" ")
+}
+```
+
+Format the final plot_data file
+```{r}
+# captitalise plot data
+for (i in 1:length(plot_data$path)){
+  plot_data$path[i]<-CapStr(as.character(plot_data$path[i]))
+}
+
+#assign gene names, fitness effects etc
+plot_data$DE<-as.character(plot_data$DE)
+plot_data$DE[is.na(plot_data$DE)]<-"Not detected"  %>%as.data.frame() #  assign NA to not detected
+
+## assign gene name and SL1344 locus
+plot_data$gene_name<-ifelse(plot_data$gene_name %in% macrophages$locus_tag,macrophages$gene_name[match( plot_data$gene_name,macrophages$locus_tag)],plot_data$gene_name)
+
+plot_data$locus_tag<-ifelse(plot_data$gene_name %in% macrophages$gene_name,macrophages$locus_tag[match( plot_data$gene_name,macrophages$gene_name)],
+                            ifelse(plot_data$gene_name %in% macrophages$locus_tag,macrophages$locus_tag[match( plot_data$gene_name,macrophages$locus_tag)], plot_data$gene_name))
+plot_data<-plot_data[,c(8,2,4:5,7,6,1,3)]
+plot_data<-apply(plot_data,2,as.character) %>% as.data.frame()
+
+```
+
+### Now that I have these datasets add the in vitro conditions
+
+```{r}
+in_vitro<-fread(paste0(data_dir,"in_vitro_wide_format.csv"),header=T, data.table=F) 
+in_vitro$SL1344_geneID<- macrophages$gene_name[match(in_vitro$SL1344_tag,macrophages$locus_tag)]
+#PA
+PA<-in_vitro[in_vitro$PA !=0,c(2:3,8)]  # select based on PA locus tags, dont take rows with 0s
+PA<-PA[PA$SL1344_tag %in% macrophages$locus_tag,]
+PA$model<-"PA"
+#H2O2
+H2O2<-in_vitro[in_vitro$H2O2 !=0,c(2,4,8)] 
+H2O2<-H2O2[H2O2$SL1344_tag %in% macrophages$locus_tag,]
+H2O2$model<-"H2O2"
+#NaCl
+NaCl<-in_vitro[in_vitro$NaCl !=0,c(2,5,8)]
+NaCl<-NaCl[NaCl$SL1344_tag %in% macrophages$locus_tag,]
+NaCl$model<-"NaCl"
+# pH3
+pH3<-in_vitro[in_vitro$pH3 !=0,c(2,6,8)]
+pH3<-pH3[pH3$SL1344_tag %in% macrophages$locus_tag,]
+pH3$model<-"pH3"
+#starvatiom
+starvation<-in_vitro[in_vitro$starvation !=0,c(2,7,8)]
+starvation<-starvation[starvation$SL1344_tag %in% macrophages$locus_tag,]
+starvation$model<-"Starvation"
+
+in_vitro<-list(PA=PA,H2O2=H2O2,NaCl=NaCl,pH3=pH3,starvation=starvation)
+
+
+df<-unique(plot_data[,1:4])
+for (i in 1:length(in_vitro)){
+  name<-paste0("df_", i)
+  assign(name,merge(x=df, by.x="gene_name", y=in_vitro[[i]][,c("SL1344_geneID","model")], by.y="SL1344_geneID", all.x=T, sort = F))
+}
+df_1<-df_1[!(is.na(df_1$model)),]
+df_2<-df_2[!(is.na(df_2$model)),]
+df_3<-df_3[!(is.na(df_3$model)),]
+df_4<-df_4[!(is.na(df_4$model)),]
+df_5<-df_5[!(is.na(df_5$model)),]
+
+ds<-rbind(df_1,df_2,df_3,df_4,df_5)
+ds$FDR<-NA
+ds$logFC<-NA
+ds$DE<-"Attenuated"
+plot_data<-rbind(plot_data,ds)
+```
+
+## Save the compiled data sets 
+
+```{r}
+library("writexl")
+## Adding and changing some values in the final
+plot_data$DE<-recode(`Insertion index >0.05`="Unchanged",`FDR>=0.1`="Unchanged",`FDR>=0.05`="Unchanged",`FDR>=0.001`="Unchanged",plot_data$DE)
+uni<-unique(as.character(plot_data$path[plot_data$cat=="GO&KEGG"]))
+
+#save
+write.csv(plot_data,paste0(excel,"FINAL_compiled_data_camera.csv"),row.names = F)
+write_xlsx(in_vitro,paste0(excel,"Mandalsetal_in_vitro.xlsx"))
+```
+
+save recoded DE terms 
+```{r}
+write.csv(macrophages,paste0(data_dir,"macrophages_formatted_DEcat.csv"),row.names = F)
+write.csv(mouse,paste0(data_dir,"mouse_formatted_DEcat.csv"),row.names = F)
+write.csv(D23580,paste0(data_dir,"D23580_formatted_DEcat.csv"),row.names = F)
+
+write.csv(phox_spleen,paste0(data_dir,"phox_spleen_formatted_DEcat.csv"),row.names = F)
+write.csv(phox_liver,paste0(data_dir,"phox_liver_formatted_DEcat.csv"),row.names = F)
+write.csv(hela_RNAseq,paste0(data_dir,"hela_RNAseq_formatted_DEcat.csv"),row.names = F)
+write.csv(hela,paste0(data_dir,"hela_formatted_DEcat.csv"),row.names = F)
+write.csv(macro_RNAseq,paste0(data_dir,"macro_RNAseq_formatted_DEcat.csv"),row.names = F)
+
+
+
+LB$logFC<-NA
+LB$FDR<-0.049 #arbitraty
+LB$DE<-ifelse(LB$ins_index<0.05,"Attenuated","Unchanged")
+InSPI2$logFC<-NA
+InSPI2$FDR<-0.049 #arbitrary
+InSPI2$DE<-ifelse(InSPI2$ins_index<0.05,"Attenuated","Unchanged")
+
+write.csv(LB,paste0(data_dir,"LB_formatted.csv"),row.names = F)
+write.csv(InSPI2,paste0(data_dir,"InSPI2_formatted.csv"),row.names = F)
+```
+
