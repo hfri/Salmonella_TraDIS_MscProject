@@ -1,0 +1,3 @@
+Formatted_files: Contains files after running script compilation.Rmd  --> these files were used for further analyses/plots
+Input_files: Contains files that are input for compilation.Rmd
+compilation.Rmd --> formats many files and makes a dataframe that contains information about fitness effects in different pathways and models.
