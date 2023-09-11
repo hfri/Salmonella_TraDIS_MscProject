@@ -1,0 +1,1047 @@
+---
+title: "20230609_Canalsetal"
+author: "Hanna Fricke"
+date: "2023-06-09"
+output: html_document
+---
+In this markdown, I analyse the supplementary data of Canals et al 2019 (https://doi.org/10.1371/journal.ppat.1007948). For this analysis I used the supplementary Table S7 which included count data of coding genes, ncRNAs, and intergenic regions obtained from salmonella grown in a macrophage model for 12 h. Of this data I excluded intergenic regions beforehand but included genes and ncRNAs. The script conducts several quality checks and a differential fitness analysis with edgeR. I conduct the fitness analysis twice, once with correction for the average logFC in plasmid genes in output samples and once without. The reason is that in previous analysis and in the initial differential fitness analysis without this correction nearly all plasmid genes appeared to be Amplified. Our hypothesis is that plasmids replicate more strongly in infected cells, resulting in more copies being present.
+This script does not contain diagnostic plots and serves to illustrate the analysis steps.
+
+## Preparation: Make folders for outputs (images, excel, RData),data,R, Rmd
+
+### Set working directory, path
+
+```{r,include=FALSE}
+# set result directory for plots etc.
+# make sure to add the correct date and follow structure output/date/date_filetype
+
+data_dir <- "/home/hanna/Documents/Macrophages_project/Final/M_D23580/data/"
+res_dir <- "/home/hanna/Documents/Macrophages_project/Final/M_D23580/output/"
+images<-paste0(res_dir,"images/")
+excel<-paste0(res_dir,"excel/")
+if(!dir.exists(res_dir)) dir.create(res_dir)
+if(!dir.exists(images)) dir.create(images)
+if(!dir.exists(excel)) dir.create(excel)
+
+knitr::opts_chunk$set(warning=F,message=F, echo=T, dev="cairo_pdf")
+# set wd
+# knitr::opts_knit$set(root.dir = '/home/hanna/Documents/Public_Data/TraDIS/')
+```
+
+### Read the sample info, data, get meta data, and prepare data for analysis
+
+  Here the main steps are to read the data, give the data appropriate column names, then to obtain the meta_data by saving it separately and removing it from the data set. Now the dataset only contains the counts
+
+  Read the excel file
+  
+```{r, echo=FALSE}
+library('dplyr')
+library('edgeR')
+library('data.table')
+# Get count data and meta data
+counts_tab <- read.table(paste(data_dir, "Canalsetal2016_macrophage_genes_ncRNA-combi.csv", sep=""), header=T, sep=",", quote="\"", stringsAsFactors=F)
+names(counts_tab)[names(counts_tab)== "Locus"]<-"locus_tag"
+meta_data <- counts_tab[,-c(8:11)] # make a frame with meta data
+counts_tab <- counts_tab[,c(8:11)]# remove meta data for the analysis so that only count data remains +make it a
+colnames(counts_tab)<- c("input1","input2","output1","output2")
+rownames(counts_tab) <- meta_data$locus_tag # genen names as row names
+counts_tab<-counts_tab %>%data.matrix()
+```
+
+
+## Initialise EdgeR variables
+
+###  Match metadata and create factor variables (batch, condition, replicate), make DGEList object
+
+```{r, echo=FALSE}
+library("limma")
+library('edgeR')
+## Get metadata
+sample_info<-data.frame(identifier=c("input1","input2","output1","output2"), # "input1",
+                        condition=c("input","input","output","output"),
+                        replicate=c("1","2","1","2"))
+group <- factor(sample_info$condition) # condition grouping factor
+replicate <- factor(sample_info$replicate) # replicate factor
+
+dgeAll <- DGEList(counts_tab, group=group, genes=rownames(counts_tab)) # make a DGE list with group indicator=column and rows= feature
+```
+
+
+### MD plots before normalisation and filtering
+
+```{r}
+library(edgeR)
+libsizes<-colMeans(counts_tab)
+libsizes<-log2(libsizes) # to get mean library size to see which one to use as ref in MD plot for individual replicates --> Rep 3 has median libsize for input ,rep2 for output
+logcounts<-log2(counts_tab+1)
+```
+Shifted from 0 before normalisation but looks like expected--> blob indicating no DE genes. Somewhat more spread at lower counts but not  a clear bias for low counts having higher dropouts
+
+### Plot Zero fraction to check for zero inflation --> in figure
+
+```{r}
+library(ggplot2)
+library(viridis)
+cts<-counts_tab
+cts[cts == 0] <- NA
+dropouts <- data.frame(mean = rowMeans(cts, na.rm = T), dropouts = rowSums(is.na(cts))/ncol(cts))
+id<-"MD23580_"
+pdf(paste0(images,id,"Zero_fractions_raw_log10counts.pdf"), width = 7, height =8)
+drops2 <- dropouts %>% ggplot(aes(x = log10(mean),y = dropouts)) + 
+  geom_point(alpha = 0.1,size=5) + theme_bw() + 
+  xlab("Log10(Mean count)") +
+  theme(axis.text.y=element_text(size=30,color="black"),
+        axis.text.x=element_text(size=30,color="black"),
+        axis.title.x=element_text(size=30,color="black",hjust=0.5, vjust=0.9,face="bold"),
+        axis.title.y=element_text(size=30,color="black",hjust=0.5, vjust=0.9,face="bold"),
+        plot.title=element_blank(),
+        axis.line = element_line(color = "black"))+
+  ylab("Zero fractions per gene") + ggtitle("")
+print(drops2)
+dev.off()
+print(drops2)
+```
+Not too many zero counts
+
+## Normalise and filter
+
+```{r}
+# rule of thumb to identify the ideal threshold
+edgeR::cpm(10, mean(dgeAll$samples$lib.size)) # returns 2.10
+# Remove all counts that are too low 
+keep <- rowSums(edgeR::cpm(dgeAll$counts[,1:2]) >=2.1)>=2# filter based on input -->4852
+dgeAll <- dgeAll[keep, , keep.lib.sizes=F] # keep.lib.sizes=FALSE, the lib.size for each sample will be recalculated 
+# inspect the filtering result
+```
+
+### Normalise data using edgeRs TMM method
+
+```{r,echo=FALSE, fig.show='hide'}
+dgeAll  <- calcNormFactors(dgeAll) # Normfactors scale the library during normalisation so that highly expressed genes do not affect the normalisation procedure
+dgeAll$samples$norm.factors <- dgeAll$samples$norm.factors
+
+#calculate the normalised counts 
+normCounts <- edgeR::cpm(dgeAll) # divide by library size and multiply by 1mio
+names<-rownames(normCounts) %>% as.data.frame()
+logNormCounts <- log2(normCounts + 1)
+```
+input 1 has a larger library size
+
+
+## EdgeR DE analysis
+
+This is the initial analysis without correction for plasmid counts
+
+### Design matrix
+
+```{r, echo=FALSE}
+designMat <- model.matrix(~0+group)# model without intercept
+colnames(designMat) <- colnames(designMat) %>% sub("group", "", .) # remove group from groupOUTPUT
+contrast<- makeContrasts(output-input, levels=designMat) 
+```
+
+### Estimate dispersion
+
+```{r, echo=FALSE}
+dgList <- estimateDisp(dgeAll, design=designMat) 
+```
+BCV estimation looks reasonable
+
+### Fit the model using quasi-likelihood method
+
+```{r}
+fit <- glmQLFit(dgList, designMat, robust=TRUE) # Fit a quasi-likelihood negative binomial glm, conduct genewise statistical tests 
+```
+
+Squeezing towards trend line works well 
+
+### Testing
+
+```{r}
+# conduct an F-test based multiple comparison test
+qlf<- glmQLFTest(fit, contrast=contrast) # empirical Bayes quasi-likelihood F-tests > stricter error rate control as it accounts for uncertainty in dispersion
+```
+
+### Inspect the results and format data
+
+```{r}
+# Extract the top DE genes 
+result<- topTags(qlf, length(logNormCounts[,1])) # get all genes
+
+# get a df with all the results and add relevant information
+result<-result$table
+names(result)[names(result)=="genes"]<-"locus_tag"
+result$gene_name<-meta_data$Gene[match(result$locus_tag, meta_data$locus_tag)] #add gene name
+result$gene_function<-meta_data$description[match(result$locus_tag, meta_data$locus_tag)] #add function
+```
+P value distribution indicates strong evidence for the alternative 0 hypothesis
+
+### Plot MDA
+Format result
+
+```{r}
+#format result data
+result$DNA_molecule<-ifelse( grepl("SLT*",result$locus_tag)==TRUE,"pSLT-BT",                     ifelse(grepl("PBT*",result$locus_tag)==TRUE,"pPBT1","Chromosome"))
+
+result$DE<-ifelse(result$FDR<0.05& result$logFC<0,"Attenuated",ifelse(result$FDR<0.05& result$logFC>0,"Amplified", "FDR>=0.05"))
+# define plotting function
+```
+
+### MDA for figure (function didnt really help)
+
+```{r}
+# Quick assignment, not thorough assignment of gene names and function
+my_data<-fread(paste0(data,"TraDIS_DE_Pl123.csv"),header=F,data.table=F) # needed for spi assignment
+result$spi<-my_data$spi[match(result$gene_name,my_data$gene_name)]
+
+pdf(paste0(images,id, "MDA_Supplementary_figure_NoPlasmidCor.pdf"),width = 10, height = 10)
+mda_canals<-ggplot(result) +
+    geom_point(data=result[which(result$DE == "FDR>=0.05"),],aes(x=logCPM,y=logFC,colour='FDR>=0.05'),shape=19,  size=5,alpha = 1/3)+
+  geom_point(data=result[which(result$DE == "Amplified"),],aes(x=logCPM,y=logFC,colour='Amplified'),  shape=19, size=5,alpha=0.4)+ 
+  geom_point(data=result[which(result$DE == "Attenuated"),],aes(x=logCPM,y=logFC,colour='Attenuated'), shape=19,size=5, alpha=0.4) +
+  geom_point(data=result[which(result$spi == "SPI-1"),],aes(x=logCPM,y=logFC,colour="SPI-1"),shape=19,  size=5,alpha = 1)+
+  geom_point(data=result[which(result$spi == "SPI-2"),],aes(x=logCPM,y=logFC,colour="SPI-2"),shape=19,  size=5,alpha = 1)+
+  geom_point(data=result[which(result$DNA_molecule == "pSLT-BT" &result$DE == "FDR>=0.05"),],aes(x=logCPM,y=logFC,colour='pSLT-BT'),alpha = 0.3,size=5)+
+    geom_point(data=result[which(result$DNA_molecule == "pSLT-BT"),],aes(x=logCPM,y=logFC,colour='pSLT-BT'),alpha = 0.4,size=4.5)+
+    geom_point(data=result[which(result$DNA_molecule == "pPBT1"&result$DE == "FDR>=0.05"),],aes(x=logCPM,y=logFC,colour='pPBT1'),alpha = 0.3,size=5)+
+    geom_point(data=result[which(result$DNA_molecule == "pPBT1"),],aes(x=logCPM,y=logFC,colour='pPBT1'),alpha = 0.4,size=4.5)+
+  geom_hline(yintercept=c(0,1,-1),linetype="dashed", color = c("black", "lightgrey","lightgrey"))+
+  scale_color_manual("", values=c("Amplified"="#38598CFF",
+                                  "Attenuated"="#440154FF",
+                                  "FDR>=0.05"="lightgrey",
+                                  "pSLT-BT"= "#FFC725CC",
+                                  "pPBT1"= "#35B779FF",
+                                  "SPI-1"= "#B8DE29FF",
+                                  "SPI-2"= 	"#FF6699"),
+                     labels= ~ stringr::str_wrap(.x, width = 1)) +
+  scale_size_manual("Log2FC Fitness", values=c(7,4)) +
+  scale_x_continuous("Average expression log2(cpm)") +
+  scale_y_continuous("Log2FC (Output/Input)") +
+  theme_classic() +
+  theme(axis.text=element_text(size=30,color="black"),
+        axis.title=element_text(size=30,color="black",face="bold"),
+        legend.text=element_text(size=20),
+        legend.title=element_text(size=20,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification=c("left","top"))
+print(mda_canals)
+dev.off()
+print(mda_canals)
+```
+
+Inspect plasmid enrichment
+
+  Inspect plasmid replication
+```{r}
+library(matrixStats)
+library('tidyr')
+# too many genes associated with plasmid replication?
+# To find out substract the input samples from the output samples for chromosomes, and individual plasmids, then get mean
+calc_logFC<-function(data){
+  #chromosome
+  # Chromosome output-input
+  chrlogFC_median<-colMedians(data[grepl("STMMW*",rownames(data)),3:4]-data[grepl("STMMW*",rownames(data)),1:2]) # substract output-input
+  
+  #plasmids
+  #SLT output-input
+  SLTlogFC_median<-colMedians(data[grepl("SLT*",rownames(data)),3:4]-data[grepl("SLT*",rownames(data)),1:2])
+  
+  #PBT output-input
+  PBTlogFC_median<-colMedians(data[grepl("PBT*",rownames(data)),3:4]-data[grepl("PBT*",rownames(data)),1:2])
+  
+  # for plotting make one DF
+  TMM_plot<-rbind(SLTlogFC_median,PBTlogFC_median,chrlogFC_median) %>%as.data.frame()
+  colnames(TMM_plot)<-c(paste0("R",1:2,""))
+  TMM_plot$molecule<-c("pSLT-BT","pPBT1","Chromosome")
+  TMM_plot<-pivot_longer(TMM_plot,cols=1:2,names_to="Replicate", values_to="LogFC")
+  TMM_plot$molecule<-factor(TMM_plot$molecule)
+  return(TMM_plot)
+}
+
+plasmid_plot<- function(data, x, y, fill, fname, DNA_n){
+png(fname, width = 3000, height =3000, res=300)
+p<-ggplot(data, aes(x=factor(x), y=y, fill=factor(fill))) +
+  geom_violin(trim = FALSE, alpha=0.5) + 
+   theme(axis.text=element_text(size=20,color="black"),
+      axis.title.x = element_text(color="black", size=20),
+      axis.title.y = element_blank(),
+      plot.title=element_text(size=20,face="bold",hjust = 0.4), # higher hjust value  here causes horizontal adjustment to left side
+      legend.text=element_text(size=20),
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.position = "none",
+      legend.justification = c("left", "top"),
+      legend.key=element_blank(),
+      legend.margin = margin(2,2,2,2),
+      legend.box = "vertical",
+      legend.key.size = unit(0.3, "cm"))+
+  geom_point(position = position_jitter(width = 0.2, seed = 2),size=3.5, alpha=0.5)+
+  ylab("Median Log2FC")+
+  scale_fill_manual(fill, values=viridis(DNA_n)) +
+  coord_flip()
+print(p)
+dev.off()
+print(p)
+}
+```
+
+  Plot
+```{r}
+TMM_plot<-data.frame(calc_logFC(logcounts))
+plasmid_plot(data=TMM_plot, x=TMM_plot$molecule, y=TMM_plot$LogFC,fill=TMM_plot$molecule,fname=paste0(images,id, "PlasmidLogFC_TMMCordata.png"),DNA_n=3)
+```
+
+ Save data
+```{r}
+write.csv(TMM_plot,paste0(excel,"Canals_TraDIS_plasmidlogFCs_median.csv")) # For later integrated plot
+```
+
+# EDGER analysis with correction for plasmid counts
+same as for M-SL1344
+
+Make an offset matrix only including the NF factors and test if the results are the same as for the initial edgeR analysis
+
+  Make an offset matrix including the normalisation factors
+```{r, echo=FALSE}
+## get logFCs from initial DE analysis per plasmid and obtain the average
+# av P1
+mean_plLFC1<-mean(result$logFC[grepl("SLT",result$locus_tag)])
+# av P2
+mean_plLFC2<-mean(result$logFC[grepl("PBT1",result$locus_tag)])
+
+## get TMM NF matrix 
+nf<-dgeAll$samples$norm.factors # make a vector with the nfs
+nf_matrix<-matrix(c(nf), ncol=4,nrow=length(dgeAll$counts[,1]), byrow = TRUE)  # make a matrix = dimensions of dgeobj
+rownames(nf_matrix) <- rownames(dgeAll$counts) 
+colnames(nf_matrix)<-colnames(dgeAll$counts)
+
+## add plasmid average to output samples
+offstlog<-log2(nf_matrix+0.1) 
+offstlog[grepl("SLT*",rownames(nf_matrix)),c(3:4)]<-offstlog[grepl("SLT",rownames(nf_matrix)),c(3:4)]+ mean_plLFC1  #add SLT
+offstlog[grepl("PBT*",rownames(nf_matrix)),c(3:4)]<-offstlog[grepl("PBT1",rownames(nf_matrix)),c(3:4)]+ mean_plLFC2 # add PBT
+
+##  get the library size
+lib_size<-nf_matrix
+for (i in 1:dim(nf_matrix)[2]){
+  lib_size[,i]<-dgeAll$samples$lib.size[i] #or *nf_matrix[,i] if corrected for TMM
+}
+```
+
+Calculate normalised log cpms 
+```{r,echo=FALSE, fig.show='hide'}
+## Calculate cpm and log cpm
+dgeAll2<-dgeAll
+nf_new2<-2^(offstlog)-0.1
+normcounts_offst<-dgeAll2$counts/(lib_size*nf_new2)*1000000 # get normalised counts 
+logNormcounts_offst<-log2(normcounts_offst+1) # get log transformed normalised counts
+```
+
+
+**Differential fitness analysis**
+
+Calculate the effective library size
+```{r,echo=FALSE}
+eff_lib_pl<-nf_matrix
+for (i in 1:dim(nf_matrix)[2]){
+  eff_lib_pl[,i]<-dgeAll$samples$lib.size[i]*nf_new2[,i]  #library size * corrected factor
+}
+```
+
+Calculate dispersion
+```{r,echo=FALSE}
+dgeAll$offset<-offset(log(eff_lib_pl)) # take natural log
+dgList3 <- estimateDisp(dgeAll, design=designMat) # first all dispersions needed
+```
+
+Fit the model
+```{r, echo=FALSE}
+#Fit the model 
+fitPl <- glmQLFit(dgList3, designMat, robust=TRUE) # Fit a quasi-likelihood negative binomial glm
+```
+
+Testing
+```{r, echo=FALSE}
+# conduct an F-test based multiple comparison test
+qlfPl<- glmQLFTest(fitPl, contrast=contrast) 
+```
+
+Explore the results
+```{r}
+# Extract the top DE genes 
+resultPl<- topTags(qlfPl, length(logNormCounts[,1])) # get all genes
+
+# get a df with all the results and add relevant information
+resultPl<-resultPl$table
+resultPl$gene_name<-meta_data$Gene[match(resultPl$genes, meta_data$locus_tag)]
+resultPl$gene_function<-meta_data$Product[match(resultPl$genes, meta_data$locus_tag)]
+names(resultPl)[names(resultPl)=="genes"]<-"locus_tag"
+```
+
+### MDA plot
+
+```{r}
+# initialise variables for plotting
+resultPl$DNA_molecule<-ifelse( grepl("SLT*",resultPl$locus_tag)==TRUE,"pSLT-BT",
+                       ifelse(grepl("PBT*",resultPl$locus_tag)==TRUE,"pPBT1","Chromosome"))
+resultPl$DE<-ifelse(resultPl$FDR<0.05& resultPl$logFC<=-0.3,"Attenuated",ifelse(resultPl$FDR<0.05& resultPl$logFC>=0.3,"Amplified", "FDR>=0.05"))
+```
+
+```{r}
+resultPl$spi<-my_data$spi[match(resultPl$gene_name,my_data$gene_name)]
+
+pdf(paste0(images,id,"MDA_Supplementary_figure_PlasmidCor.pdf"),width = 10, height = 10)
+mda_canals_cor<-ggplot(resultPl) +
+    geom_point(data=resultPl[which(resultPl$DE == "FDR>=0.05"),],aes(x=logCPM,y=logFC,colour='FDR>=0.05'),shape=19,  size=5,alpha = 1/3)+
+  geom_point(data=resultPl[which(resultPl$DE == "Amplified"),],aes(x=logCPM,y=logFC,colour='Amplified'),  shape=19, size=5,alpha=0.4)+ 
+  geom_point(data=resultPl[which(resultPl$DE == "Attenuated"),],aes(x=logCPM,y=logFC,colour='Attenuated'), shape=19,size=5, alpha=0.4) +
+  geom_point(data=resultPl[which(resultPl$spi == "SPI-1"),],aes(x=logCPM,y=logFC,colour="SPI-1"),shape=19,  size=5,alpha = 1)+
+  geom_point(data=resultPl[which(resultPl$spi == "SPI-2"),],aes(x=logCPM,y=logFC,colour="SPI-2"),shape=19,  size=5,alpha = 1)+
+  geom_point(data=resultPl[which(resultPl$DNA_molecule == "pSLT-BT" &resultPl$DE == "FDR>=0.05"),],aes(x=logCPM,y=logFC,colour='pSLT-BT'),alpha = 0.3,size=5)+
+    geom_point(data=resultPl[which(resultPl$DNA_molecule == "pSLT-BT"),],aes(x=logCPM,y=logFC,colour='pSLT-BT'),alpha = 0.4,size=4.5)+
+    geom_point(data=resultPl[which(resultPl$DNA_molecule == "pPBT1"&resultPl$DE == "FDR>=0.05"),],aes(x=logCPM,y=logFC,colour='pPBT1'),alpha = 0.3,size=5)+
+    geom_point(data=resultPl[which(resultPl$DNA_molecule == "pPBT1"),],aes(x=logCPM,y=logFC,colour='pPBT1'),alpha = 0.4,size=4.5)+
+  geom_hline(yintercept=c(0,1,-1),linetype="dashed", color = c("black", "lightgrey","lightgrey"))+
+  scale_color_manual("", values=c("Amplified"="#38598CFF",
+                                  "Attenuated"="#440154FF",
+                                  "FDR>=0.05"="lightgrey",
+                                  "pSLT-BT"= "#FFC725CC",
+                                  "pPBT1"= "#35B779FF",
+                                  "SPI-1"= "#B8DE29FF",
+                                  "SPI-2"= 	"#FF6699"),
+                     labels= ~ stringr::str_wrap(.x, width = 1)) +
+  scale_size_manual("Log2FC Fitness", values=c(7,4)) +
+  scale_x_continuous("Average expression log2(cpm)") +
+  scale_y_continuous("Log2FC (Output/Input)") +
+  theme_classic() +
+  theme(axis.text=element_text(size=30,color="black"),
+        axis.title=element_text(size=30,color="black",face="bold"),
+        legend.text=element_text(size=20),
+        legend.title=element_text(size=20,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification=c("left","top"))
+print(mda_canals_cor)
+dev.off()
+print(mda_canals_cor)
+```
+
+
+##Patchwork for supplementary figure
+```{r}
+library(patchwork)
+pdf(paste0(images,id, "MDA_patchwork_suppl.pdf"),width=40,height=11)
+mda_zeros<-(drops2+mda_canals&theme(plot.margin = unit(c(2,4,2,2), "cm")))
+mda_zeros<-mda_zeros+mda_canals_cor+ plot_layout(ncol=3)
+print(mda_zeros)
+dev.off()
+print(mda_zeros)
+```
+
+### Possible cut-off
+```{r}
+library(ggridges)
+library(plyr)
+resultPl_1<-resultPl
+resultPl_1$model<-""
+resultPl_1$DE<-ifelse(resultPl_1$FDR<0.05&abs(resultPl_1$logFC)>=0.3, "Yes", "No")
+pdf(paste0(images,id,"Density_distributions_DF_effects_D23580.pdf"), width = 10, height =8)
+D23580_cor<-ggplot(resultPl_1, aes(x=logFC, y=model,group = interaction(DE, model), fill = DE)) +
+  geom_density_ridges(alpha=0.4) +
+  theme_ridges() + 
+  theme(axis.text.y=element_text(size=30,color="black"),
+        axis.title.y = element_blank(),
+        axis.text.x=element_text(size=30,color="black"),
+        axis.title.x=element_text(size=30,color="black",hjust=0.5, vjust=0.9,face="bold"),
+        plot.title=element_blank(),
+        legend.text=element_text(size=30),
+        legend.title=element_text(size=30,face="bold"),
+        legend.spacing.x=unit(0.1, "cm"),
+        legend.position="right",
+        legend.justification = c("left","top"),
+        legend.box="vertical",
+        legend.margin=margin(),
+        axis.line = element_line(color = "black"))+
+  guides(fill=guide_legend(title="Fitness effect:"))+
+  xlab("Log2FC (Output/Input)")+
+  scale_fill_manual("DE",values=c("darkgrey", "#31688EFF"))+
+  geom_vline(xintercept=c(-0.3,0,0.3),linetype="dashed",linewidth=2, color = c("#31688EFF", "lightgrey","#31688EFF"))+
+    scale_x_continuous(breaks=seq(round_any(min(resultPl_1$logFC),10), round_any(max(resultPl_1$logFC),10),2)) +
+  scale_y_discrete(expand = c(0, 0))
+
+print(D23580_cor)
+dev.off()
+print(D23580_cor)
+```
+
+**Assign COG categories**
+
+This part of the script is concerned with assigning COG categories to individual genes in the D23580 dataset.
+FIND COG categories in DE genes
+```{r}
+library(data.table)
+eggnog<- fread(paste0(data_dir,"eggnog_african_strain.tsv"))
+COG_desc<-fread(paste0(data_dir,"20230309_COG_categories.csv"))
+names(eggnog)[names(eggnog)=="#query"]<-"query"
+names(eggnog)[names(eggnog)=="Preferred_name"]<-"gene_name"
+uniq<-unique(eggnog$query)
+eggnog<-eggnog[match(uniq,eggnog$query)]
+rownames(eggnog) <- eggnog$query # V1= gene names
+```
+
+Make a dataframe of genes with their COG category
+```{r}
+## get COG categories per gene
+COG_genes<-as.data.frame(cbind(eggnog$query,eggnog$gene_name,eggnog$COG_category)) # get categories with their gene names
+colnames(COG_genes)<-c("locus_tag","gene_name","COG")
+```
+
+Add COG to general results
+```{r}
+resultPl$COG<- ifelse(resultPl$gene_name %in%COG_genes$gene_name,COG_genes$COG[match(resultPl$gene_name,COG_genes$gene_name)], COG_genes$COG[match(resultPl$locus_tag,COG_genes$locus_tag)]) # match based on gene name
+resultPl$COG<-as.factor(resultPl$COG)
+```
+
+Get summary statistics and names of unique categories
+```{r}
+# look at summary stats
+sumCOG<-summary(resultPl$COG)  %>% as.data.frame() # get summary statistics of the different categories
+colnames(sumCOG)<-c("count")
+sumCOG$COG_cat<-rownames(sumCOG)
+```
+
+Assign gene in my dataset COG description
+```{r}
+resultPl$description<-COG_desc$Description[match(resultPl$COG,COG_desc$Category)]
+resultPl$theme<-COG_desc$Theme[match(resultPl$COG,COG_desc$Category)]
+## COG categories obtained from eggnog can be combinations so they need some manual editing 
+# assign name to NA or - categories
+resultPl$description[which(resultPl$COG == "-"|is.na(resultPl$COG)==T)]<-"no category"
+resultPl$theme[which(resultPl$COG == "-"|is.na(resultPl$COG)==T)]<-"no theme"
+
+#get variables that are combined--> not necessary to make an extravariable but may be nice for overview
+combiCOG<-sumCOG$COG_cat[which(!(sumCOG$COG_cat %in% COG_desc$Category)& sumCOG$COG_cat != "-" & sumCOG$COG_cat != "NA's")]%>% as.data.frame()
+colnames(combiCOG)<-c("COG_cat")
+
+# make a list that saves the combined terms and the associated description and themes
+#initialise
+COG_list<-list()
+COG_l<-list()
+# for loop that splits string, looks for corresponding description/themes, merges them and then save it as character vector 
+for (i in 1:length(combiCOG[,1])){ 
+  cat1<-list()
+  cat2<-list()
+  COG_list[i]<-strsplit(combiCOG$COG_cat[i], "")
+  COG_cat<-COG_list[i]
+  names(COG_cat) <- combiCOG$COG_cat[i]
+  COG_l<-append(COG_l, COG_cat)
+  idx<-combiCOG$COG_cat[i]
+  for (ii in 1:length(COG_l[[idx]])){ 
+    cat1<-append(cat1,resultPl$description[match(COG_l[[idx]][[ii]],resultPl$COG)])
+    cat2<-append(cat2,resultPl$theme[match(COG_l[[idx]][[ii]],resultPl$COG)])}
+  COG_l[[idx]]<-append(COG_l[idx],c(list(paste(cat1,sep="",collapse = ";")),list(paste0(unique(cat2),sep="",collapse=";"))))
+}
+# Assign combined terms to corresponding entry in my data
+for (i in 1:length(COG_l)){
+  idx<-which(names(COG_l[i])==resultPl$COG)
+  resultPl$description[idx]<-COG_l[[i]][[2]]
+  resultPl$theme[idx]<-COG_l[[i]][[3]]}
+```
+
+### Map SL1344 tag
+```{r}
+mapping<-fread( paste0(data,"SL1344toD23580_map.tsv"),header=F,data.table = F)
+macrophages<-fread(paste0(data,"TraDIS_DE_Pl123.csv"),header=F,data.table=F)
+# SL1344 tag mapping
+names(mapping)[names(mapping)=="V1"]<-"D23580_tag"  # change name
+names(mapping)[names(mapping)=="V2"]<-"SL1344_tag"  # change name
+duplicates<-mapping[duplicated(mapping$D23580_tag),] # identify duplicates--> I think I took the wrong column
+mapping<-mapping[!(mapping$D23580_tag %in%duplicates$D23580_tag),] # remove duplicates 
+mapping<-mapping %>% distinct(D23580_tag, .keep_all = TRUE)
+mapping<-mapping %>% distinct(SL1344_tag, .keep_all = TRUE)
+rownames(mapping)<-mapping$SL1344_tag
+resultPl$SL1344_tag<-mapping$SL1344_tag[match(resultPl$locus_tag,mapping$D23580_tag)]
+resultPl$SL1344_tag<-ifelse(resultPl$locus_tag %in% mapping$D23580_tag,mapping$SL1344_tag[match(resultPl$locus_tag,mapping$D23580_tag)],
+                          ifelse(resultPl$gene_name %in% macrophages$gene_name,macrophages$locus_tag[match(resultPl$gene_name,macrophages$gene_name)],resultPl$locus_tag)) 
+#resultPl1 <-resultPl%>% distinct(SL1344_tag, .keep_all = TRUE) # didnt make a difference
+```
+
+## Save files
+```{r}
+write.csv(logNormCounts,paste0(excel,"Canals_TMM_logcpm.csv"),row.names = FALSE)
+write.csv(result,paste0(excel,"Canals_DEfitness_not_corrected.csv"),row.names = FALSE)
+write.csv(logNormcounts_offst,paste0(excel,"Canals_TMM_PlasmidCor_logcpm.csv"),row.names = FALSE)
+```
+
+# Pathway analysis
+
+  *Load packages*
+  
+```{r,echo=FALSE}
+### CRAN
+library('RColorBrewer')
+library("writexl")
+library('KEGGREST')
+library('GO.db')
+```
+
+  *Read eggnog file and counts file*
+
+```{r,echo=FALSE}
+# # prepare pathway analysis
+
+# import data from bio-tradis output files and create count table
+fcn <- read.table(paste(data_dir, "eggnog_african_strain.tsv", sep=""), header=F, sep="\t", quote="", stringsAsFactors=F) # eggnog file
+fcn<-unique(fcn)
+rownames(fcn) <- fcn$V1 # V1= gene names
+
+tab <- counts_tab %>% as.data.frame() #gene counts
+```
+
+**Get your custom gene set**
+
+  *Obtain KEGG terms* 
+
+```{r}
+# associative array function
+hash <- function( keys ) {
+    result <- new.env( hash = TRUE, parent = emptyenv(), size = length( keys ) )
+    for( key in keys ) {
+        result[[ key ]] <- NA
+    }
+    return( result )
+}
+
+id_kegg_hash <- hash(rownames(tab)) #initialize id hash
+id_kegg_hash <- fcn$V13[match(rownames(tab), fcn$V1)] #fill KEGG Pathway
+id_name_hash <- hash(rownames(tab))
+id_name_hash <- fcn$V9[match(rownames(tab), fcn$V1)] # match gene name
+
+id_go_hash <- hash(rownames(tab))
+id_go_hash <- fcn$V10[match(rownames(tab), fcn$V1)] # fill in GO ID
+id_gname_hash <- hash(rownames(tab))
+id_gname_hash <- fcn$V9[match(rownames(tab), fcn$V1)] #match gene name
+
+l <- strsplit(fcn[,13], ",") # split KEGG field list
+l <- unlist(l) # flatten list
+l <- unique(l) # get unique entries
+l <- l[grep("map", l)]
+
+all_paths <- l
+
+kegg_hash <- hash(l) # initialize name hash
+
+
+kegg_hash <- sapply(l, function(x){ #fill name hash with KEGGREST
+    tryCatch(keggGet(x)[[1]]$NAME, error=function(e) e) # needed to use this otherwise it gave an error
+})
+
+l <- strsplit(fcn[,10], ",") # split GO field list
+l <- unlist(l) # flatten list
+l <- unique(l) # uniqify
+
+all_paths <- c(all_paths, l)
+
+GO_hash <- hash(l)
+GO_hash <- sapply(l, function(x) toString(Term(x)))
+```
+
+  *Create pathway indices* 
+
+```{r, eval=F}
+# Create binary list which contains pathways with more than 10 genes present in the RNAseq data
+pathway_indices <- lapply(all_paths, function(x) {
+  if(grepl("map", x)) {
+    sapply(dgList3$genes, function(y) ifelse(y %in% rownames(fcn), grepl(x, fcn[y,13]), F)) %>% as.vector()
+  } else {
+    sapply(dgList3$genes, function(y) ifelse(y %in% rownames(fcn), grepl(x, fcn[y,10]), F)) %>% as.vector()
+  }
+})
+names(pathway_indices) <- all_paths
+setNull <- sapply(pathway_indices, function(x) sum(x)<10) # get only pathways with more than 10 gene counts
+pathway_indices[which(setNull)] <- NULL
+write.csv(do.call(rbind, pathway_indices) * 1, paste0(data_dir, "pathway_indices.csv"), quote=F)
+```
+
+  *Load pathway file for downstream analyses*
+
+```{r}
+# load binary matrix with pathways and genes
+pathway_file <- paste0(data_dir, "pathway_indices.csv")
+pathway_indices <- (read.csv(pathway_file, quote="", row.names=1) == 1)
+pathway_indices <- setNames(split(pathway_indices, seq(nrow(pathway_indices))), rownames(pathway_indices))
+```
+
+  Comment: Until here it was Lars' script
+
+  **Next parts: my script**
+  
+  Load packages
+```{r}
+library(purrr)
+library(stringr)
+```
+
+## Filtering
+
+**Hierachical filtering of GO terms before use**
+  
+  *Get offspring terms using GO**OFFSRPING:*
+  
+  I decided to conduct hierachical filtering first by excluding terms with too many offspring terms. The code is probably overly complicated but it works..
+  
+  In the following the GO-term names are extracted from the pathway list. Then the ontology class for each term is extracted which is needed to use GO[XX]OFFSPRING to identify the number of offspring terms for each GO-term. The outcome is a list of offspring terms associated with each GO-term. 
+  
+```{r}
+# Get pathway list names and list of GO-terms
+Pathway_list<-names(pathway_indices)%>% as.data.frame() # get all pathways in indice list
+Go_terms<-Pathway_list[grepl("GO*",Pathway_list[,1]),] # get all GO terms 
+
+## Filter GO-terms from pathway list based on number of Offspring 
+
+#inititalise list
+Offspring_list <- list()  
+
+# get Offspring using GOBPOFFSPRING --> need to check for all three subcategories of GO
+# Loop through all GO-terms and check their ontology, then look for offspring according to ontology, save result in list with first entry being the parental term
+for (i in 1:length(Go_terms)){
+  if (is.na(startsWith(Ontology(Go_terms[i]), "BP")) |is.na(startsWith(Ontology(Go_terms[i]), "MF")) |is.na(startsWith(Ontology(Go_terms[i]), "CC")) ){ # first check if any of the entries is NA, needed otherwise throws error)
+    Offspring_list[[i]]<-list(Go_terms[i],"obsolete") # terms with NA are obsolete terms in GO-database
+  } else if (startsWith(Ontology(Go_terms[i]), "BP") ){
+      ls<-as.list(tryCatch(get(Go_terms[i], GOBPOFFSPRING), error = function(e) e)) # If BP and catch error
+      Offspring_list [[i]]<-list(Go_terms[i],ls)
+    } else if (startsWith(Ontology(Go_terms[i]), "MF") ){
+      ls<-as.list(tryCatch(get(Go_terms[i], GOMFOFFSPRING), error = function(e) e)) # if MF and catch error
+      Offspring_list [[i]]<-list(Go_terms[i],ls)
+    } else if (startsWith(Ontology(Go_terms[i]), "CC") ){
+      ls<-as.list(tryCatch(get(Go_terms[i], GOCCOFFSPRING), error = function(e) e)) # if CC and catch error
+      Offspring_list [[i]]<-list(Go_terms[i],ls) # first entry saves the parent term, second is list of offspring
+    }
+}
+
+# check for errors
+error_GO<-list()
+for (i in 1:length(Offspring_list)){
+  if (length(Offspring_list [[i]][[2]])==2 &grepl("*not found*",Offspring_list [[i]][[2]][[1]])){
+    error_GO[[i]]<-Offspring_list [[i]][[1]]}
+}
+
+length(Offspring_list) # identify number of GO-terms associated w. offspring
+```
+
+  
+*Filter Offspring*
+  
+  The offspring list is then filtered. Only GO-terms with less than 5 offspring terms are kept, 
+```{r}
+## now filter Offspring_list
+# initialise variable
+Offspring_filtered<-list()
+
+# filter GO_terms according to the number offspring by looping through list and delete terms with 'obsolete' values
+for (i in 1:length(Offspring_list)){
+  if (length(Offspring_list [[i]][[2]])<5){ # filter for number of allowed offspring terms
+      if (("obsolete" %in% Offspring_list [[i]][[2]])==FALSE) { #dont include obsolete terms
+      Offspring_filtered<-append(Offspring_filtered,Offspring_list [[i]][[1]])}}
+}
+
+#Offspring_filtered<-discard(map(Offspring_filtered, ~ discard(.x, is.null)), is.null) # discard the NULL entries if present
+Offspring_filtered<-unlist(Offspring_filtered) 
+
+```
+
+  
+Now that I have a pre-filtered list:
+
+**Get number of genes per GO-term**
+  
+  In this pre-filtered list, we now check the size of the GO-terms. To do so, we count the number of genes per GO-term using the eggnog file. Eggnog saves GO-terms in one variable as one string. Thus, the following code, extracts the string, breaks it down and counts individual occurences of the each string. 
+```{r}
+# Get genes associated with each Go-term from file
+library(tidyr)
+## initialise variables
+# make a dataframe where every Go-term entry is split at the , and added as new row
+new_eggnog<-fcn[fcn$V1 %in% rownames(counts_tab),] # only take genes present in my dataset
+new_eggnog<-separate_rows(new_eggnog,sep = ",", V10) # separates file based on GO-terms
+unique_GO<- unique(new_eggnog$V10)%>% matrix  #  get unique GO-term in eggnog
+
+## initialise list in which to save the genes associated with each term
+gene_list<-list()
+gene_l<- list()
+
+# Loop through unique GO-terms and find matching GO-terms by index
+for (i in 1:length(unique_GO)){
+  gene_list[i]<-list(new_eggnog$V1[which(new_eggnog$V10 %in% unique_GO[i])]) # identify gene based on index
+  genes <- gene_list[i] 
+  names(genes) <- unique_GO[i]
+  gene_l<-append(gene_l, genes) # last three lines were needed to save list with GO-term as name of the entry
+}
+rm(gene_list) # not needed anymore
+```
+  Genes are now saved as character vector in gene_l under their GO-term
+
+Make a dataframe that summarises the information regarding the GO-terms (Number of genes, which genes, Go-term ID)
+```{r}
+# GO terms with number of genes and locus_tags per pathwat
+Go_df<-matrix(nrow=length(gene_l),ncol=3)
+for (i in 1:length(gene_l)){
+  Go_df[i,1]<-names(gene_l[i])
+  Go_df[i,2]<-c(length(strsplit(gene_l[[i]], "\\w+"))) # save individual genes as string to enable addition to df, use word character not letters --> w+
+  Go_df[i,3]<-paste(gene_l[[i]],collapse=',')}
+Go_df<-as.data.frame(Go_df)
+
+#some formatting
+colnames(Go_df)<-c("Goterm","Ngenes","locus_tag")
+Go_df$Ngenes<-as.integer(Go_df$Ngenes) # was saved as string
+
+resultDE<-resultPl[resultPl$FDR<0.05,]
+# to get the common and DE gene name
+for (i in 1:length(Go_df[,1])){
+  genes<-strsplit(Go_df$locus_tag[i], ",") %>% as.data.frame() # split string and save as dataframe
+  DE<-resultDE$locus_tag[resultDE$locus_tag %in% genes[,1]]
+  DEg<-resultDE$gene_name[resultDE$locus_tag %in% genes[,1]]
+  genes<-resultPl$gene_name[match(genes[,1],resultPl$locus_tag)] # get gene name associated with each locus tag in df
+  Go_df$gene_names[i]<-paste(genes,collapse=',')
+  Go_df$DE_locus[i]<-paste(DE,collapse=',') # all DE genes 
+  Go_df$DE_genes[i]<-paste(DEg,collapse=',')} # all DE genes
+
+```
+  In the dataframe genes and GO-terms are now associated
+
+ Now filter out terms with very high number of genes
+ 
+```{r}
+## Filter 
+HighN<-Go_df[Go_df$Ngenes>=100,] 
+Offspring_filtered<-Offspring_filtered[!(Offspring_filtered %in% HighN$Goterm)] %>% as.matrix() # only select genes below/equal N=100
+
+length(Offspring_filtered[,1])
+rm(HighN) # not needed anymore
+copy_offspring<-Offspring_filtered
+```
+
+
+**Filter for parental terms in list**
+  
+  Some terms in the filtered list from previous steps might be patental terms of other terms in the list. So, filter out genes in filtered pathway that are parents of another using a similar approach as before using GO[XX]OFFSPRING
+```{r}
+## check for children in GO-terms
+par<-list()
+children<-list()
+for (i in 1:length(Offspring_filtered[,1])){
+  if (startsWith(Ontology(Offspring_filtered[i]), "BP") ==TRUE){
+    children<-as.list(tryCatch(get(Offspring_filtered[i], GOBPOFFSPRING), error = function(e) e))
+    idx<-which(Offspring_filtered %in% children)
+  }else if (startsWith(Ontology(Offspring_filtered[i]), "MF") ==TRUE){
+    children<-as.list(tryCatch(get(Offspring_filtered[i], GOMFOFFSPRING), error = function(e) e)) #catch errror if go function is different
+    idx<-which(Offspring_filtered %in% children)
+  }else if (startsWith(Ontology(Offspring_filtered[i]), "CC") ==TRUE){
+    children<-as.list(tryCatch(get(Offspring_filtered[i], GOCCOFFSPRING), error = function(e) e))
+    idx<-which(Offspring_filtered %in% children)
+    } # gets index of child term
+  if(!(identical(idx, integer(0)))){ # if the index is unequal to 0, then the offspring term is a parent
+    par<-append(par,Offspring_filtered[i])}}
+
+Offspring_nopar<-Offspring_filtered[!(Offspring_filtered %in% unlist(par))]
+
+length(Offspring_nopar)
+# remove stuff thats not needed
+rm(idx)
+rm(children)
+```
+
+**KEGG pathway filtering**
+
+  Now, we do something similar for the KEGG terms associated with the dataset.
+  
+  First get KEGG names and description from the kegg_hash variable
+```{r}
+# make a variable that has the kegg identifier and pathway description in it
+# initialise the matrix
+keggID<-matrix(c(0), ncol=2,nrow=length(kegg_hash), byrow = TRUE)
+#fill in the matrix
+for (i in 1:length(kegg_hash)){
+  keggID[i,1]<-names(kegg_hash)[i] # get identifier
+  if (length(kegg_hash[[i]])==1){ # only take "real entries"
+    keggID[i,2]<-kegg_hash[[i]] }
+  else{
+      keggID[i,2]<-names(kegg_hash)[i] # take the name,bec. could not find URL
+    }
+}
+
+# make a dataframe
+keggID<-keggID%>% as.data.frame()
+rownames(keggID)<-keggID$V1
+colnames(keggID)<-c("keggNames","Description")
+```
+
+  Also get the genes associated with each KEGG pathway. Does the same as the code for the GO-terms
+```{r}
+# Use Kegg_hash to V1-266 and look for corresponding gene in new_eggnog$V9 
+#   get unique 
+new_eggnog2<-fcn[fcn$V1 %in% rownames(counts_tab),] # only take genes present in my dataset
+
+# get the genes associated with each kegg term and save in list
+ls_kegg<-list()
+kegg_l<-list()
+for (i in 1:length(1:length(keggID[,1]))){
+  ls_kegg[i]<- list(new_eggnog2$V1[which(str_detect(new_eggnog2$V13,keggID$keggNames[i]))]) # get gene name associated w keggID
+  kegg <- ls_kegg[i]
+  names(kegg) <- keggID$keggNames[i]
+  kegg_l<-append(kegg_l, kegg)}
+
+## add to kegg dataframe
+for (i in 1:length(kegg_l)){
+  keggID$locus_tag[i]<-paste(kegg_l[[i]],collapse=',') # make string
+  keggID$locus_tag[i]<-gsub(',-|-,|-','',keggID$locus_tag[i])# clean up entries
+  keggID$Ngenes[i]<-c(length(strsplit(kegg_l[[i]], "\\w+"))) # count number of words =number of genes
+  } # clean up entries
+
+keggID<- keggID[keggID$locus_tag != "",] # drop empty rows
+keggID$Ngenes<-as.integer(keggID$Ngenes) # was saved as string
+
+# remove terms with too many or too few genes
+HighlowN<-keggID[keggID$Ngenes>=200 | keggID$Ngenes<=2 ,] # IDs with higher than 200, lower than 2
+keggID<-keggID[!(keggID$keggNames %in% HighlowN$keggNames),]  # only select genes below/equal N=100
+
+# figured that kegg_hash is not of the same length as the pathway_indices, so I need to get the ones that are in the indice list only 
+keggID<-keggID[keggID$keggNames %in% Pathway_list$.,]
+
+# loop to assign gene names to locus tag
+for (i in 1:length(keggID[,1])){
+  genes<-strsplit(keggID$locus_tag[i], ",") %>% as.data.frame() # split string
+  DE<-resultDE$locus_tag[resultDE$locus_tag %in% genes[,1]] 
+  DEg<-resultDE$gene_name[resultDE$locus_tag %in% genes[,1]] 
+  genes<-resultPl$gene_name[match(genes[,1],resultPl$locus_tag)] # save gene names
+  keggID$gene_names[i]<-paste(genes,collapse=',')
+  keggID$DE_locus[i]<-paste(DE,collapse=',')
+  keggID$DE_genes[i]<-paste(DEg,collapse=',')} # collapse string to save in keggID
+
+## clean up
+rm(ls_kegg)
+rm(HighlowN) # not needed anymore\
+
+```
+
+
+**Get modified indice list for downstream analysis**
+
+  As I now filtered and removed a substantial portion of the pathways I can get indices depending on the filtered pathways/terms
+```{r}
+pathway_indicesGOKEGG<- c(pathway_indices[names(pathway_indices) %in% Offspring_nopar],pathway_indices[names(pathway_indices) %in% keggID$keggNames])
+```
+
+## Gene set enrichment analysis- Camera
+
+
+  Camera is a competative test which allows to look at which pathway is most important and takes the whole genetic background into account.
+
+  Use camera for competative test
+
+```{r, fig.show="asis"}
+# Use fry for pathway enrichment analysis and use the indices for both GO and KEGG
+cam_res <-camera.DGEList(dgList3, index=pathway_indicesGOKEGG, design=designMat, contrast=contrast)%>% as.data.frame() # test
+```
+
+  Formatting again
+```{r, fig.show="asis"}
+# give results appropriate columns and names and fill in information
+GO_hasm<-GO_hash%>% as.data.frame()
+
+cam_res$path<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$Description[match( rownames(cam_res),keggID$keggNames)],GO_hasm$.[match(rownames(cam_res),rownames(GO_hasm))])
+
+cam_res$genes<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$gene_names[match( rownames(cam_res),keggID$keggNames)],Go_df$gene_names[match(rownames(cam_res),Go_df$Goterm)]) # gene ID associated with pathwa/GO term
+
+cam_res$locus_tag<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$locus_tag[match( rownames(cam_res),keggID$keggNames)],Go_df$locus_tag[match(rownames(cam_res),Go_df$Goterm)]) 
+
+#  get DE locus tags and gene names
+cam_res$DEgenes<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$DE_genes[match( rownames(cam_res),keggID$keggNames)],Go_df$DE_genes[match(rownames(cam_res),Go_df$Goterm)]) 
+cam_res$DEd23580<-ifelse(rownames(cam_res)%in% rownames(keggID),keggID$DE_locus[match( rownames(cam_res),keggID$keggNames)],Go_df$DE_locus[match(rownames(cam_res),Go_df$Goterm)]) 
+```
+   
+   Function for formatting
+```{r, fig.show="asis"}
+# format dataset 
+#Function to capitalise string from https://rstudio-pubs-static.s3.amazonaws.com/408658_512da947714740b99253228f084a08a9.html
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+      sep="", collapse=" ")
+}
+```
+ 
+  Inspect DE pathways
+```{r, fig.show="asis"}
+# get DE pathways
+cam_res$term<-rownames(cam_res) # assign ID
+
+l<-strsplit(cam_res$DEd23580,",")
+replace_locus<-function(x){
+  x<-resultPl$SL1344_tag[match(x,resultPl$locus_tag)]
+}
+
+l<-lapply(l,replace_locus)
+l<-lapply(l,paste0,collapse=",")
+names(l)<-cam_res$term
+cam_res$DElocus<-unlist(l[match(cam_res$term,names(l))])
+
+```
+
+
+```{r}
+library(ggridges)
+library(ggplot2)
+# capitalise pathway
+for (i in 1:length(cam_res$path)){
+  cam_res$path[i]<-CapStr(cam_res$path[i])
+}
+
+# add gene ratio and Condition
+for (i in 1:length(cam_res[,1])){
+  cam_res$GeneRatio[i]<-sum(strsplit(cam_res$locus_tag,",")[[i]] %in% resultDE$locus_tag==T)/cam_res$NGenes[i]
+}
+# other formatting stuff
+cam_res$type<-ifelse(grepl("map*",cam_res$term)==T,"KEGG","GO") #assign pathway type
+cam_res$Direction[cam_res$Direction== "Up"]<-"Amplified"
+cam_res$Direction[cam_res$Direction== "Down"]<-"Attenuated"
+
+#de pathways
+pathwayDE<- cam_res[cam_res$FDR<0.05 ,] # get Amplified pathways
+length(pathwayDE$path) # get number of Amplified pathways
+```
+
+```{r}
+camera_plot<-pathwayDE
+pdf(paste0(images,id,"pathways_FDR<0.05.pdf"), width = 20, height = 15)
+pGo <-ggplot(data = camera_plot, aes(x =GeneRatio , y = path, 
+                        color = FDR, size = NGenes, shape=Direction)) + 
+  geom_point(stroke = 1.3) +
+  scale_shape_manual(values=c(19,21))+
+  scale_colour_viridis_c(breaks=c(min(camera_plot$FDR),max(camera_plot$FDR)/2,max(camera_plot$FDR)),labels=c("0","",as.character(round(max(camera_plot$FDR),3))))+
+  theme_bw() +
+  theme(axis.title.x = element_text(color="black", size=40),
+        axis.text.x = element_text(size =30,color="black"),
+        axis.text.y = element_text(size = 30,color="black"),
+        axis.title.y=element_text(size=40,colour="black",face="bold"),
+        legend.text=element_text(size=30,color="black"),
+        legend.title=element_text(size=30,face="bold",color="black"),
+        legend.justification = c("left","top"))+
+  guides(shape=guide_legend(title="Gene set"),size=guide_legend(title="Gene number"))+
+  scale_y_discrete(labels = function(y) str_wrap(y, width =70))+
+  ylab("") + 
+  xlab("Gene ratio (N genes/ N Genes pathway)") 
+  print(pGo)
+  dev.off()
+```
+
+```{r}
+write.csv(cam_res,paste0(excel,"pathway_camera_D23580.csv"))
+```
+
+
+```{r}
+sessionInfo()
+```
+
