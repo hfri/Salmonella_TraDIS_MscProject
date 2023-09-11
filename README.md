@@ -18,19 +18,19 @@ For the integrative analysis, one folder is added with all datafiles ultimately 
     - M-RNAseq: [Canals et al. 2019b](M-RNAseq)
         - Contains scripts and data for differential expression analysis of str ST74 survival in macrophages
 ### Integrative analysis
-- folder contains a script that was used to compile and format a lot of the datasets at once
-- data folder contains input data, these are datafiles that came from different individual analyses
-- formatted_data contains the datafiles that come out of the compilation step using SCRIPT X and were used for subsequent plots etc.
-- Data includes result from re-analyses (see above) and:
-  - Balb/c: [Chaudhuri et al. 2013]
+- folder contains a script that was used to compile and format datasets
+- Input_files contains input data for the script that then formats and compiles them--> these are datafiles that came from different individual analyses
+- Formatted_data contains the datafiles that come out of the compilation step using compilation.Rmd. These datasets were used for plots etc.
+- Data includes results from re-analyses (see above) and:
+  - Balb/c from Chaudhuri et al. 2013:
       - Contains fitness data of strain SL1344 in Balb/c mice; food animal data was not utilised due to concerns regarding stochastic loss in the data
       - Data: read counts,logFCs, p-values
       - Re-analysis: taken as logFC corresponding to the minimal adjusted p-val because statistics were provided per insertion site
-  - Immunodeficient mice: [Grant et al. 2016]
+  - Immunodeficient mice from Grant et al. 2016:
       - Fitness data of strain SL1344 for gp91 -/- phox mice.
       - Data: read counts,logFCs, p-values
       - Re-analysis: taken as logFC corresponding to the minimal adjusted p-val because statistics were provided per insertion site
-  - In vitro: [Mandal et al. 2016]
+  - In vitro stressors from Mandal et al. 2021:
       - Fitness data of strain 14280s grown in different in vitro conditions
       - Data: gene names with fitness effects
       - Re-analysis: None
