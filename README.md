@@ -26,11 +26,11 @@ Expression data:
         - Contains fitness data of strain SL1344 in Balb/c mice; food animal data was not utilised due to concerns regarding stochastic loss in the data
         - Data: read counts,logFCs, p-values
         - Re-analysis: taken as logFC corresponding to the minimal adjusted p-val because statistics were provided per insertion site
-    -Immunodeficient mice: [Grant et al. 2016]
+  - Immunodeficient mice: [Grant et al. 2016]
         - Fitness data of strain SL1344 for gp91 -/- phox mice.
         - Data: read counts,logFCs, p-values
         - Re-analysis: taken as logFC corresponding to the minimal adjusted p-val because statistics were provided per insertion site
-    - In vitro: [Mandal et al. 2016]
+  - In vitro: [Mandal et al. 2016]
         - Fitness data of strain 14280s grown in different in vitro conditions
         - Data: gene names with fitness effects
         - Re-analysis: None
